@@ -1,0 +1,24 @@
+{
+	"required": true,
+	"package": "com.liquidum.client.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"ScreenMixin",
+		"GameRendererMixin",
+		"PostChainAccessor",
+		"PostPassAccessor",
+		"GuiRendererMixin",
+		"AbstractButtonMixin",
+		"ShaderManagerAccessor",
+		"ConfigsAccessor",
+		"ShaderManagerMixin",
+		"AbstractSliderButtonMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}
+

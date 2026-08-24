@@ -18,7 +18,7 @@ loom {
 	splitEnvironmentSourceSets()
 
 	mods {
-		"modid" {
+		"liquidum" {
 			sourceSet sourceSets.main
 			sourceSet sourceSets.client
 		}
@@ -32,6 +32,13 @@ dependencies {
 
 	// Fabric API. This is technically optional, but you probably want it anyway.
 	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// Local debugging mod (ShaderDevTools / coreshader-devtools), prebuilt for MC 26.2.
+	// Loaded alongside Liquidum so its in-game inspector (G) and MCP server can introspect
+	// our glass shader's uniform/sampler bindings. Loom does not auto-pick jars from libs/,
+	// so it must be declared. runtimeOnly keeps it on the game classpath (Fabric discovers
+	// it via fabric.mod.json) without Loom trying to remap a prebuilt jar.
+	runtimeOnly files('libs/coreshader-devtools-1.3.6.jar')
 }
 
 processResources {
