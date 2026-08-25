@@ -2,6 +2,7 @@ package com.liquidum.client.mixin;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.liquidum.client.shader.LiquidGlassRenderer;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.AbstractSliderButton;
@@ -28,6 +29,10 @@ public class AbstractSliderButtonMixin {
 	private void liquidum$skipTrackSprite(GuiGraphicsExtractor instance, RenderPipeline pipeline, Identifier sprite,
 	                                      int x, int y, int width, int height, int color,
 	                                      Operation<Void> original) {
+		if (!LiquidGlassRenderer.replaceVanillaButtonBackground()) {
+			original.call(instance, pipeline, sprite, x, y, width, height, color);
+			return;
+		}
 		// no-op: glass tile replaces the track
 	}
 }

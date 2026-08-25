@@ -2,7 +2,9 @@ package com.liquidum.client;
 
 import com.liquidum.LiquidumMod;
 import com.liquidum.client.config.LiquidumConfig;
+import com.liquidum.client.debug.LiquidumDebugState;
 import com.liquidum.client.material.MaterialRegistry;
+import com.liquidum.client.shader.LiquidGlassRenderer;
 
 /**
  * Central lifecycle hub (ТЗ §B). Initializes GL-free services in order and
@@ -22,10 +24,18 @@ public final class LiquidumCore {
 		}
 		LiquidumMod.LOGGER.info("Liquidum core initializing");
 		config = LiquidumConfig.load();
+		pushConfig();
 		materials = new MaterialRegistry();
 		materials.registerDefaults();
 		initialized = true;
-		LiquidumMod.LOGGER.info("Liquidum core initialized (materials={})", materials.defaultMaterial() != null ? "ready" : "empty");
+		LiquidumMod.LOGGER.info("Liquidum core initialized (materials={}, enabled={})",
+			materials.defaultMaterial() != null ? "ready" : "empty", config.enabled);
+	}
+
+	/** Push config values into the runtime consumers (renderer, debug state). */
+	private static void pushConfig() {
+		LiquidGlassRenderer.applyConfig(config);
+		LiquidumDebugState.crashOnError = config.crashOnError;
 	}
 
 	public static LiquidumConfig getConfig() {
@@ -49,5 +59,6 @@ public final class LiquidumCore {
 
 	public static void reloadConfig() {
 		config = LiquidumConfig.load();
+		pushConfig();
 	}
 }

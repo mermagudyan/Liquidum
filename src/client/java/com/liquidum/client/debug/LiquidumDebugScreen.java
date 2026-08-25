@@ -37,6 +37,8 @@ public class LiquidumDebugScreen extends Screen {
 		addToggle(x, y, w, "Aberration", () -> LiquidumDebugState.aberration, v -> LiquidumDebugState.aberration = v); y += step;
 		addToggle(x, y, w, "Rim", () -> LiquidumDebugState.rim, v -> LiquidumDebugState.rim = v); y += step;
 		addToggle(x, y, w, "Frost", () -> LiquidumDebugState.frost, v -> LiquidumDebugState.frost = v); y += step;
+		addToggle(x, y, w, "Fuse", () -> LiquidumDebugState.fusion, v -> LiquidumDebugState.fusion = v); y += step;
+		addToggle(x, y, w, "AnimOpen", () -> LiquidumDebugState.animOpen, v -> LiquidumDebugState.animOpen = v); y += step;
 		addToggle(x, y, w, "CrashOnError", () -> LiquidumDebugState.crashOnError, v -> LiquidumDebugState.crashOnError = v); y += step;
 
 		addNumeric(x, y, w, "CornerRadius", () -> LiquidumDebugState.cornerRadiusFraction, v -> LiquidumDebugState.cornerRadiusFraction = v, 0f, 1f, 0.05f, 0.35f); y += step;
@@ -44,6 +46,8 @@ public class LiquidumDebugScreen extends Screen {
 		addNumeric(x, y, w, "Fresnel", () -> LiquidumDebugState.fresnel, v -> LiquidumDebugState.fresnel = v, 0f, 5f, 0.1f, 1f); y += step;
 		addNumeric(x, y, w, "SharpnessMix", () -> LiquidumDebugState.sharpnessMix, v -> LiquidumDebugState.sharpnessMix = v, 0f, 1f, 0.05f, 0.08f); y += step;
 		addNumeric(x, y, w, "FrostRadius(blur)", () -> LiquidumDebugState.frostRadius, v -> LiquidumDebugState.frostRadius = v, 0f, 30f, 1f, 10f); y += step;
+		addNumeric(x, y, w, "FuseRadius(px)", () -> LiquidumDebugState.fusionRadius, v -> LiquidumDebugState.fusionRadius = v, 0f, 60f, 2f, 18f); y += step;
+		addNumeric(x, y, w, "AnimMs", () -> LiquidumDebugState.animMillis, v -> LiquidumDebugState.animMillis = v, 50f, 1000f, 10f, 220f); y += step;
 
 		addRenderableWidget(Button.builder(Component.literal("Dump state to log"), b -> {
 			LiquidumDebugState.dump();

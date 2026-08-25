@@ -42,6 +42,11 @@ public class LiquidumConfig {
 	public boolean dynamicQuality = true;
 	public boolean cacheBackground = true;
 	public int maxFpsTarget = 60;
+	public float parallaxStrength = 1.0f;   // 0 = off, ~1 = subtle iOS-like drift
+
+	// Dev / debug
+	public boolean debugLogging = true;
+	public boolean crashOnError = false;
 
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 

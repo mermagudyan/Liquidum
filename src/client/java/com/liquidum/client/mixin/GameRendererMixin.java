@@ -12,15 +12,21 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class GameRendererMixin {
 
 	/**
-	 * REPLACE vanilla's menu blur with the Liquidum glass chain.
-	 * processBlurEffect is invoked at the stratum boundary inside
-	 * GuiRenderer.draw: main holds the world + screen background, widgets
-	 * are not drawn yet. Works on every screen (title has no level, so
-	 * level-based hooks never fire there).
+	 * THE glass trigger point. The engine calls processBlurEffect()
+	 * UNCONDITIONALLY inside GuiRenderer.draw(), exactly between the two
+	 * executeDrawRange phases: background strata first (world backdrop,
+	 * title-screen overlays — panorama itself renders directly before that),
+	 * then this boundary, then widget strata. Running the chain here means
+	 * glass composites over the finished background and under the widgets on
+	 * every screen, in-game and menu alike.
+	 *
+	 * We cancel vanilla's own gaussian blur (its blurred backdrop quad is
+	 * suppressed separately in ScreenMixin) and run the Liquidum chain instead.
 	 */
 	@Inject(method = "processBlurEffect()V", at = @At("HEAD"), cancellable = true)
 	private void liquidum$glassInsteadOfVanillaBlur(CallbackInfo ci) {
-		ci.cancel(); // no vanilla fullscreen blur
+		if (!LiquidGlassRenderer.isEnabled()) return;
+		ci.cancel();
 		LiquidGlassRenderer.applyOncePerFrame();
 	}
 

@@ -16,11 +16,16 @@ public class LiquidumClient implements ClientModInitializer {
 		LiquidumMod.LOGGER.info("Liquidum initialized");
 		LiquidumCore.init();
 
-		// F7 opens the Liquidum Lab (raw GLFW poll - no keybinding API needed).
+		// F7 toggles the Liquidum Lab from anywhere — over the world, over any
+		// open screen; pressing it again closes the Lab.
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			boolean down = GLFW.glfwGetKey(client.getWindow().handle(), GLFW.GLFW_KEY_F7) == GLFW.GLFW_PRESS;
-			if (down && !labKeyWasDown && client.gui.screen() == null) {
-				client.gui.setScreen(new LiquidumDebugScreen());
+			if (down && !labKeyWasDown) {
+				if (client.gui.screen() instanceof LiquidumDebugScreen lab) {
+					lab.onClose();
+				} else {
+					client.gui.setScreen(new LiquidumDebugScreen());
+				}
 			}
 			labKeyWasDown = down;
 		});

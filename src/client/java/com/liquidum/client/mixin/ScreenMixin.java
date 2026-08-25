@@ -64,16 +64,25 @@ public class ScreenMixin {
 
 	@Inject(method = "extractBlurredBackground", at = @At("HEAD"), cancellable = true)
 	private void liquidum$suppressVanillaBlurFlag(CallbackInfo ci) {
-		// Vanilla sets the blur flag here; we set our own at extractBackground
-		// TAIL instead — only one flag per frame is allowed.
+		// ALWAYS cancel vanilla's marker here. Container screens have
+		// isInGameUi=false, so vanilla fires this MID-extractBackground —
+		// BEFORE the container panel texture is recorded — which pushed the
+		// panel into the after-blur phase, covering our glass tiles.
+		// The fallback in liquidum$afterBackground sets the marker AFTER the
+		// whole extractBackground (dim + panel included): background goes
+		// below the glass, slots/items above it. Vanilla's actual blur is
+		// cancelled in GameRendererMixin, its backdrop quad in
+		// extractMenuBackground below.
+		if (!LiquidGlassRenderer.isEnabled()) return;
 		ci.cancel();
 	}
 
 	@Inject(method = "extractMenuBackground", at = @At("HEAD"), cancellable = true)
 	private void liquidum$suppressMenuBackdrop(CallbackInfo ci) {
-		// The vanilla menu backdrop quad (gradient/blurred sample) draws AFTER
-		// our glass blit and covers the tiles with a flat color from the stale
-		// blur target. Our glassout IS the backdrop now.
+		// The vanilla menu backdrop quad samples the blur target we never
+		// render (vanilla blur is cancelled), so it would paint a flat stale
+		// color over our tiles. Our glassout IS the backdrop now.
+		if (!LiquidGlassRenderer.isEnabled()) return;
 		ci.cancel();
 	}
 
@@ -95,21 +104,38 @@ public class ScreenMixin {
 		)
 	)
 	private void liquidum$afterBackground(GuiGraphicsExtractor guiGraphics, int mouseX, int mouseY, float partialTick, CallbackInfo ci) {
-		// NOTE: no blur-boundary flag here! Setting it makes the engine draw its
-		// own blurred-backdrop quad (sampling the stale blur target = flat color)
-		// over our tiles. Without the flag there is no engine backdrop; our
-		// glassout blit below is the backdrop, widgets draw above it.
-		// The glass result is now composited straight into the screen by the
-		// post-chain's final pass (glass.json: pass 2 writes minecraft:main),
-		// so no GUI-extraction blit is needed here. A raw GpuTextureView blit
-		// during extraction is NOT preserved by the deferred GuiRenderState,
-		// which is why the old blit produced a flat screen.
-		return;
+		// Title screen (and any screen with an empty extractBackground) never
+		// fires extractBlurredBackground, so no blur-stratum marker exists and
+		// ALL elements — including the fullscreen panorama blit recorded by
+		// extractPanorama — land in the after-blur phase, painting over our
+		// glass composite. If vanilla didn't set the marker this frame, set it
+		// here: everything extracted so far (background/panorama) goes below
+		// the boundary, everything after (widgets) stays above it.
+		if (!LiquidGlassRenderer.isEnabled()) return;
+		// Frame-scoped guard (reset in LiquidGlassRenderer.resetFrame): several
+		// screens can be extracted per frame; the engine throws on a second
+		// blurBeforeThisStratum within one frame.
+		if (!LiquidGlassRenderer.isBlurMarkerSeen()) {
+			// CRITICAL: start a NEW stratum BEFORE requesting the marker.
+			// blurBeforeThisStratum marks "blur before stratum == current
+			// counter" — everything recorded at stratum >= counter goes to the
+			// after-blur phase. Without nextStratum() the marker equals the
+			// CURRENT (background) stratum, so the background itself (dim,
+			// container panel) lands in the after-blur phase and paints OVER
+			// our glass tiles.
+			guiGraphics.nextStratum();
+			guiGraphics.blurBeforeThisStratum();
+			LiquidGlassRenderer.setBlurMarkerSeen();
+		}
 	}
 
 	@Inject(method = "init", at = @At("TAIL"))
 	private void liquidum$onScreenInit(CallbackInfo ci) {
 		LiquidGlassRenderer.dumpWidgetClasses = true;
+		if (LiquidGlassRenderer.DEBUG) {
+			com.liquidum.LiquidumMod.LOGGER.info("[glass] screen init: {}@{}",
+				getClass().getSimpleName(), Integer.toHexString(hashCode()));
+		}
 		LiquidGlassRenderer.startAnimation(true);
 	}
 

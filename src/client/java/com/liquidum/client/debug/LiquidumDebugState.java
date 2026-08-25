@@ -22,6 +22,14 @@ public class LiquidumDebugState {
 	/** Frost gaussian radius in pixels (= blur radius fed to blur25). */
 	public static float frostRadius = 10.0f;
 
+	/** SDF fusion of neighbouring tiles (metaball merge); radius in px, 0/off = hard union. */
+	public static boolean fusion = true;
+	public static float fusionRadius = 18.0f;
+
+	/** Open animation: tiles grow out of their centres with a slight rise (easeOutCubic). */
+	public static boolean animOpen = true;
+	public static float animMillis = 220.0f;
+
 	/** Material params (mirrored from glass.fsh; all editable live from the Lab). */
 	public static float cornerRadiusFraction = 0.35f;
 	public static float refraction = 40.0f;
@@ -32,8 +40,10 @@ public class LiquidumDebugState {
 	 * When true, fragile render failures (chain missing, process error, uniform
 	 * buffer gone) throw instead of being swallowed → you get a real crash report
 	 * with a full stack trace instead of a silent "gray screen".
+	 * Seeded from config.crashOnError at core init; the Lab toggle overrides it
+	 * for the current session.
 	 */
-	public static boolean crashOnError = true;
+	public static boolean crashOnError = false;
 
 	public static String modeName() {
 		return switch (mode) {
@@ -43,19 +53,20 @@ public class LiquidumDebugState {
 			case 3 -> "DIAG:uScreen";
 			case 4 -> "DIAG:uMeta(count)";
 			case 5 -> "DIAG:uRects[0]";
+			case 6 -> "DIAG:MAGENTA";
 			default -> "FULL";
 		};
 	}
 
 	public static void cycleMode() {
-		mode = (mode + 1) % 6;
+		mode = (mode + 1) % 7;
 		LiquidumMod.LOGGER.info("[lab] mode = {}", modeName());
 	}
 
 	public static void dump() {
 		LiquidumMod.LOGGER.info(
-			"[lab] STATE: mode={} hover={} aberration={} rim={} frost={} frostRadius={} crashOnError={}",
-			modeName(), hover, aberration, rim, frost, frostRadius, crashOnError);
+			"[lab] STATE: mode={} hover={} aberration={} rim={} frost={} frostRadius={} fusion={} fusionRadius={} animOpen={} animMillis={} crashOnError={}",
+			modeName(), hover, aberration, rim, frost, frostRadius, fusion, fusionRadius, animOpen, animMillis, crashOnError);
 		LiquidumMod.LOGGER.info(
 			"[lab] MATERIAL: cornerRadius={} refraction={} fresnel={} sharpnessMix={}",
 			cornerRadiusFraction, refraction, fresnel, sharpnessMix);
