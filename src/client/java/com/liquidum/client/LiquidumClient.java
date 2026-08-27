@@ -1,10 +1,13 @@
 package com.liquidum.client;
 
+import com.liquidum.client.creative.TabHistory;
 import com.liquidum.client.debug.LiquidumDebugScreen;
+import com.liquidum.client.interaction.ButtonInteractionHandler;
 import com.liquidum.LiquidumMod;
 import com.liquidum.client.shader.LiquidGlassRenderer;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.minecraft.client.Minecraft;
 import org.lwjgl.glfw.GLFW;
 
@@ -28,6 +31,10 @@ public class LiquidumClient implements ClientModInitializer {
 				}
 			}
 			labKeyWasDown = down;
+			ButtonInteractionHandler.tick(client);
 		});
+
+		// Creative Tab Stack: history persists until the player leaves the world.
+		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> TabHistory.clear());
 	}
 }

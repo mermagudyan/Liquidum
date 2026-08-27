@@ -1,5 +1,5 @@
-﻿{
-    "targets": { "glassout": { "persistent": true } },
+{
+    "targets": { "glassout": { "persistent": true }, "uiprev": { "persistent": true } },
     "passes": [
         {
             "vertex_shader": "minecraft:core/screenquad",
@@ -133,9 +133,9 @@
                 { "name": "uRects125", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] },
                 { "name": "uRects126", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] },
                 { "name": "uRects127", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] },
-                { "name": "uParams", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uMeta", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uScreen", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uFlags", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uRing", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uGrid", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uPanel", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uPar", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }
+                { "name": "uParams", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uMeta", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uScreen", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uFlags", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uRing", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uGrid", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uPanel", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uPar", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }, { "name": "uAnim", "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] }
             ] },
-            "inputs": [ { "sampler_name": "In", "target": "minecraft:main" } ],
+            "inputs": [ { "sampler_name": "In", "target": "minecraft:main" }, { "sampler_name": "Prev", "target": "uiprev" } ],
             "output": "glassout"
         },
         {

@@ -1,8 +1,6 @@
 package com.liquidum.client.mixin;
 
-import com.liquidum.client.debug.LiquidumDebugScreen;
 import com.liquidum.client.shader.LiquidGlassRenderer;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.AbstractButton;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;

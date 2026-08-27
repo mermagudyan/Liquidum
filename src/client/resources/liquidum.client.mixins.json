@@ -8,14 +8,19 @@
 		"PostChainAccessor",
 		"PostPassAccessor",
 		"AbstractButtonMixin",
-		"ImageButtonMixin",
-		"HudMixin",
+		"AbstractWidgetInteractionMixin",
+				"HudMixin",
 		"ContainerMixin",
 		"GuiGraphicsExtractorMixin",
+		"ForegroundDeferralMixin",
 		"ShaderManagerAccessor",
 		"ConfigsAccessor",
 		"ShaderManagerMixin",
-		"AbstractSliderButtonMixin"
+		"AbstractSliderButtonMixin",
+		"CreativeScreenMixin",
+		"ItemPickerMenuAccessor",
+		"AbstractContainerScreenAccessor",
+		"TextStyleMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

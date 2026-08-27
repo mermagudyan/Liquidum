@@ -40,6 +40,7 @@ public class LiquidumDebugScreen extends Screen {
 		addToggle(x, y, w, "Fuse", () -> LiquidumDebugState.fusion, v -> LiquidumDebugState.fusion = v); y += step;
 		addToggle(x, y, w, "AnimOpen", () -> LiquidumDebugState.animOpen, v -> LiquidumDebugState.animOpen = v); y += step;
 		addToggle(x, y, w, "CrashOnError", () -> LiquidumDebugState.crashOnError, v -> LiquidumDebugState.crashOnError = v); y += step;
+		addToggle(x, y, w, "GeometryDebug", () -> LiquidumDebugState.debugGeometry, v -> LiquidumDebugState.debugGeometry = v); y += step;
 
 		addNumeric(x, y, w, "CornerRadius", () -> LiquidumDebugState.cornerRadiusFraction, v -> LiquidumDebugState.cornerRadiusFraction = v, 0f, 1f, 0.05f, 0.35f); y += step;
 		addNumeric(x, y, w, "Refraction", () -> LiquidumDebugState.refraction, v -> LiquidumDebugState.refraction = v, 0f, 200f, 5f, 40f); y += step;

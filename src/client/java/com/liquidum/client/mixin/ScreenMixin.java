@@ -1,7 +1,9 @@
 package com.liquidum.client.mixin;
 
+import com.liquidum.client.interaction.ButtonInteractionHandler;
 import com.liquidum.client.shader.LiquidGlassRenderer;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.client.gui.components.AbstractButton;
 import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -31,6 +33,11 @@ public class ScreenMixin {
 	 */
 	@Inject(method = "extractRenderState", at = @At("TAIL"))
 	private void liquidum$collectWidgetRects(GuiGraphicsExtractor guiGraphics, int mouseX, int mouseY, float partialTick, CallbackInfo ci) {
+		// L4 FOREGROUND: переигрываем отложенные модели (игрок, книга,
+		// флаг) и progress-иконки печек/точил/столов зачарования в widget-фазе
+		// — они рендерятся ПОВЕРХ glass composite, sharp.
+		LiquidGlassRenderer.replayForeground(guiGraphics);
+		LiquidGlassRenderer.replayDeferredSprites(guiGraphics);
 		List<int[]> rects = new ArrayList<>();
 		StringBuilder dump = null;
 		if (LiquidGlassRenderer.DEBUG && LiquidGlassRenderer.dumpWidgetClasses) {
@@ -58,6 +65,18 @@ public class ScreenMixin {
 			int w = widget.getWidth();
 			int h = widget.getHeight();
 			if (w <= 0 || h <= 0) continue;
+			// P1 iPhone pressed/hover spring — scale rect around centre (§T)
+			if (listener instanceof AbstractButton btn) {
+				float s = ButtonInteractionHandler.getScale(btn);
+				if (s != 1.0f && s > 0.8f && s < 1.2f) {
+					int nw = Math.round(w * s);
+					int nh = Math.round(h * s);
+					int nx = widget.getX() + (w - nw)/2;
+					int ny = widget.getY() + (h - nh)/2;
+					rects.add(new int[]{ nx, ny, nw, nh });
+					continue;
+				}
+			}
 			rects.add(new int[] { widget.getX(), widget.getY(), w, h });
 		}
 	}
@@ -84,6 +103,24 @@ public class ScreenMixin {
 		// color over our tiles. Our glassout IS the backdrop now.
 		if (!LiquidGlassRenderer.isEnabled()) return;
 		ci.cancel();
+	}
+
+	/**
+	 * P0: remove the fullscreen background dim for container screens.
+	 *
+	 * Vanilla {@code Screen.extractTransparentBackground(GuiGraphicsExtractor)}
+	 * paints a fullscreen translucent dark overlay (fillGradient(0,0,w,h,
+	 * -1072689136,-804253680), alpha ~0.75) into the background stratum. Our
+	 * glass chain samples that stratum at processBlurEffect, so the world
+	 * behind every container GUI was being darkened ~50-70% before the glass
+	 * even touched it. Cancel ONLY for containers; PauseScreen keeps dim.
+	 */
+	@Inject(method = "extractTransparentBackground", at = @At("HEAD"), cancellable = true)
+	private void liquidum$removeContainerWorldDim(GuiGraphicsExtractor guiGraphics, CallbackInfo ci) {
+		if (!LiquidGlassRenderer.isEnabled()) return;
+		if ((Object) this instanceof AbstractContainerScreen) {
+			ci.cancel();
+		}
 	}
 
 	/**

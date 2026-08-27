@@ -22,12 +22,17 @@ public class LiquidumDebugState {
 	/** Frost gaussian radius in pixels (= blur radius fed to blur25). */
 	public static float frostRadius = 10.0f;
 
+	/** GEOMETRY DEBUG (P0): draw red crosses on vanilla Slot centres and green
+	 *  crosses on GridWell shader cell centres to verify the two coordinate
+	 *  systems coincide. */
+	public static boolean debugGeometry = false;
+
 	/** SDF fusion of neighbouring tiles (metaball merge); radius in px, 0/off = hard union. */
 	public static boolean fusion = true;
 	public static float fusionRadius = 18.0f;
 
 	/** Open animation: tiles grow out of their centres with a slight rise (easeOutCubic). */
-	public static boolean animOpen = true;
+	public static boolean animOpen = false; // P: анимации появления кнопок off — не мозолит глаза
 	public static float animMillis = 220.0f;
 
 	/** Material params (mirrored from glass.fsh; all editable live from the Lab). */

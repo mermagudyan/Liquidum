@@ -49,6 +49,12 @@ public class HudMixin {
 		LiquidGlassRenderer.submitHotbar(guiGraphics.guiWidth(), guiGraphics.guiHeight(), sel, offhand);
 	}
 
+	@Inject(method = "extractRenderState", at = @At("TAIL"))
+	private void liquidum$submitDock(GuiGraphicsExtractor guiGraphics, DeltaTracker deltaTracker, CallbackInfo ci) {
+		if (!LiquidGlassRenderer.isEnabled()) return;
+		LiquidGlassRenderer.submitLuminanceDock(guiGraphics.guiWidth(), guiGraphics.guiHeight());
+	}
+
 	/**
 	 * Skip vanilla hotbar sprites so glass replaces them:
 	 * ordinal 0 = bar background, 1 = selection frame (our animated ring

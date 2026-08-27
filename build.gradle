@@ -23,6 +23,12 @@ loom {
 			sourceSet sourceSets.client
 		}
 	}
+	runs {
+		client {
+			client()
+			programArgs "--username", "mermagudyan", "--uuid", "ad96c39f1b2047a58b5802365e1cad34"
+		}
+	}
 }
 
 dependencies {

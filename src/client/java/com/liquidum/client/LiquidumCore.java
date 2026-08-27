@@ -5,6 +5,7 @@ import com.liquidum.client.config.LiquidumConfig;
 import com.liquidum.client.debug.LiquidumDebugState;
 import com.liquidum.client.material.MaterialRegistry;
 import com.liquidum.client.shader.LiquidGlassRenderer;
+import com.liquidum.client.text.LiquidumTypography;
 
 /**
  * Central lifecycle hub (ТЗ §B). Initializes GL-free services in order and
@@ -35,6 +36,7 @@ public final class LiquidumCore {
 	/** Push config values into the runtime consumers (renderer, debug state). */
 	private static void pushConfig() {
 		LiquidGlassRenderer.applyConfig(config);
+		LiquidumTypography.applyConfig(config);
 		LiquidumDebugState.crashOnError = config.crashOnError;
 	}
 
