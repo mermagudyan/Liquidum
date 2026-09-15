@@ -17,6 +17,8 @@ public class AbstractButtonMixin {
 	@Inject(method = "extractDefaultSprite", at = @At("HEAD"), cancellable = true)
 	private void liquidum$replaceBackgroundWithGlass(CallbackInfo ci) {
 		if (!LiquidGlassRenderer.replaceVanillaButtonBackground()) return;
+		// Opted-out screens keep full vanilla rendering, no glass anywhere
+		if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(net.minecraft.client.Minecraft.getInstance().gui.screen())) return;
 		ci.cancel();
 	}
 }

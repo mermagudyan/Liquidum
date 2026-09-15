@@ -8,11 +8,13 @@
 		"Liquidum Team"
 	],
 	"contact": {
-		"homepage": "https://github.com/liquidum/liquidum"
+		"homepage": "https://github.com/mermagudyan/Liquidum",
+		"sources": "https://github.com/mermagudyan/Liquidum",
+		"issues": "https://github.com/mermagudyan/Liquidum/issues"
 	},
-	"license": "LGPL-3.0",
+	"license": "GPL-3.0-only",
 	"icon": "assets/liquidum/icon.png",
-	"environment": "*",
+	"environment": "client",
 	"entrypoints": {
 		"main": [
 			"com.liquidum.LiquidumMod"

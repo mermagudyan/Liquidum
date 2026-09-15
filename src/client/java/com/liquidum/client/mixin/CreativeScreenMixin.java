@@ -48,6 +48,7 @@ public class CreativeScreenMixin {
 	@Inject(method = "mouseScrolled", at = @At("HEAD"), cancellable = true)
 	private void liquidum$smoothScroll(double mouseX, double mouseY, double xAmount, double yAmount,
 	                                   CallbackInfoReturnable<Boolean> cir) {
+		if (!com.liquidum.client.LiquidumCore.getConfig().smoothScroll) return;
 		if (!LiquidGlassRenderer.replaceSlotTiles()) return;
 		if (!canScroll()) return;
 		if (Float.isNaN(liquidum$scrollTarget)) liquidum$scrollTarget = scrollOffs;
@@ -64,6 +65,7 @@ public class CreativeScreenMixin {
 	@Inject(method = "extractRenderState", at = @At("HEAD"))
 	private void liquidum$animateScroll(GuiGraphicsExtractor guiGraphics, int mouseX, int mouseY,
 	                                    float partialTick, CallbackInfo ci) {
+		if (!com.liquidum.client.LiquidumCore.getConfig().smoothScroll) return;
 		if (Float.isNaN(liquidum$scrollTarget)) {
 			liquidum$scrollTarget = scrollOffs;
 			return;
@@ -87,6 +89,7 @@ public class CreativeScreenMixin {
 
 	@Inject(method = "selectTab", at = @At("HEAD"))
 	private void liquidum$onSelectTab(CreativeModeTab tab, CallbackInfo ci) {
+		liquidum$scrollTarget = Float.NaN;
 		TabHistory.Transition t = TabHistory.transitionTo(tab);
 		if (t != TabHistory.Transition.NONE && LiquidGlassRenderer.isTabTransitionEnabled()) {
 			LiquidGlassRenderer.startTabTransition();

@@ -5,6 +5,8 @@ import com.liquidum.client.LiquidumCore;
 import com.liquidum.client.motion.SpringPhysics;
 import net.minecraft.client.gui.components.AbstractButton;
 import net.minecraft.client.gui.components.AbstractWidget;
+import net.minecraft.client.gui.components.CycleButton;
+import net.minecraft.client.gui.screens.inventory.AbstractRecipeBookScreen;
 import net.minecraft.client.Minecraft;
 
 import java.util.IdentityHashMap;
@@ -28,13 +30,28 @@ public final class ButtonInteractionHandler {
         float hoverCurrent = 0f;
         boolean isPressed = false;
         State() {
-            scale.stiffness = 650f;
-            scale.damping = 35f;
+            // Едва заметная живость как у iPhone: мягкий spring, минимальный overshoot
+            scale.stiffness = 620f;
+            scale.damping = 30f;
             scale.mass = 1f;
         }
     }
 
+    public static boolean isPressed(AbstractWidget w) {
+        State s = STATES.get(w);
+        return s != null && s.isPressed;
+    }
+
     private ButtonInteractionHandler() {}
+
+    // Recipe controls own their press timing and toggle state
+    private static boolean isRecipeControl(AbstractWidget w) {
+        if (w == null) return false;
+        if (w.getClass().getName().contains("recipebook.")) return true;
+        if (w instanceof CycleButton
+            && Minecraft.getInstance().gui.screen() instanceof AbstractRecipeBookScreen) return true;
+        return false;
+    }
 
     private static State getOrCreate(AbstractWidget w) {
         return STATES.computeIfAbsent(w, k -> new State());
@@ -53,6 +70,12 @@ public final class ButtonInteractionHandler {
     /** Called from AbstractButtonMixin on mouseClicked HEAD (cancellable). */
     public static boolean onButtonMouseClicked(AbstractButton btn, net.minecraft.client.input.MouseButtonEvent event, boolean bl) {
         if (!LiquidumCore.getConfig().enabled || !LiquidumCore.getConfig().buttonsGlass) return false;
+        if (isRecipeControl(btn)) return false;
+        // §D: книга рецептов открывается на 2-й клик если iOS-defer — у неё свой
+        // toggleVisibility который ждёт immediate onPress. Bypass iOS для неё.
+        try {
+            if (com.liquidum.client.shader.LiquidGlassRenderer.isRecipeBookButton(btn)) return false;
+        } catch (Exception ignored) {}
         // Only iOS-style for primary button (left) — right clicks pass through
         try {
             var info = event.buttonInfo();
@@ -64,7 +87,7 @@ public final class ButtonInteractionHandler {
         double my = event.y();
         if (!btn.isMouseOver(mx, my)) return false;
 
-        // iOS: action NOT yet, just enter pressed state with spring shrink
+        // WOW: visible press depth — the cabochon dents, action deferred to release
         State st = getOrCreate(btn);
         st.isPressed = true;
         st.scale.setTarget(0.97f);
@@ -78,6 +101,10 @@ public final class ButtonInteractionHandler {
 
     public static boolean onButtonMouseReleased(AbstractButton btn, net.minecraft.client.input.MouseButtonEvent event) {
         if (!LiquidumCore.getConfig().enabled || !LiquidumCore.getConfig().buttonsGlass) return false;
+        if (isRecipeControl(btn)) return false;
+        try {
+            if (com.liquidum.client.shader.LiquidGlassRenderer.isRecipeBookButton(btn)) return false;
+        } catch (Exception ignored) {}
         State st = STATES.get(btn);
         if (st == null || !st.isPressed) return false;
         // Only if this widget was the pressed one
@@ -88,9 +115,9 @@ public final class ButtonInteractionHandler {
         double mx = event.x();
         double my = event.y();
         boolean stillOver = btn.isMouseOver(mx, my) && btn.isActive() && btn.visible;
-        // Spring bounce: overshoot then settle to hover/normal
-        st.scale.velocity = 2.5f; // kick
-        st.scale.setTarget(stillOver ? 1.02f : 1.0f);
+        // WOW: spring-back with overshoot — release pops past 1.0 and settles
+        st.scale.velocity = 3.5f;
+        st.scale.setTarget(1.0f);
 
         if (stillOver) {
             // Fire action on release (iOS) — delegate to vanilla onClick
@@ -119,6 +146,8 @@ public final class ButtonInteractionHandler {
     /** Call every client tick to advance springs and hover. */
     public static void tick(Minecraft mc) {
         if (mc == null || !LiquidumCore.getConfig().enabled) return;
+        // Reduced motion: no spring overshoot
+        boolean reduced = LiquidumCore.getConfig().reducedMotion;
         float dt = 1f/60f;
         var iter = new java.util.ArrayList<>(STATES.entrySet());
         for (var e : iter) {
@@ -128,12 +157,21 @@ public final class ButtonInteractionHandler {
                 STATES.remove(w);
                 continue;
             }
+            // Disabled → no hover, settle to 1.0 dim
+            if (!w.active) {
+                st.hoverCurrent = 0f;
+                if (st.scale.isAtRest()) st.scale.setTarget(1.0f);
+                st.scale.update(dt);
+                continue;
+            }
             boolean over = false;
             try { over = w.isHovered(); } catch (Exception ignored) {}
             if (!st.isPressed) {
                 float hoverT = over || w.isFocused() ? 1f : 0f;
+                if (reduced) hoverT *= 0.3f;
                 st.hoverCurrent += (hoverT - st.hoverCurrent) * (1f - (float)Math.exp(-12*dt));
-                float scaleT = 1.0f + 0.02f * st.hoverCurrent;
+                // WOW hover-lift: focused/hovered hero glass rises a touch
+                float scaleT = w.isFocused() ? 1.015f : 1.0f;
                 if (st.scale.isAtRest()) st.scale.setTarget(scaleT);
             }
             st.scale.update(dt);

@@ -2,7 +2,6 @@ package com.liquidum.client.config;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import net.fabricmc.loader.api.FabricLoader;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,8 +27,10 @@ public class LiquidumConfig {
 	public boolean buttonsGlass = true;
 	public boolean healthGlass = true;
 	public boolean hungerGlass = true;
-	public boolean armorGlass = true;
-	public boolean xpBarGlass = true;
+	// Experimental icon halos, toggled live from Lab ADV
+	public boolean armorGlass = false;
+	public boolean xpBarGlass = false;
+	public boolean airGlass = false;
 	public boolean crosshairGlow = false;
 
 	// Quality
@@ -65,14 +66,15 @@ public class LiquidumConfig {
 	// Creative (§13–16)
 	public boolean tabStackEnabled = false;
 	public int tabStackVisibleCount = 5;       // how many tabs are visually prominent
+	public boolean smoothScroll = false;      // experimental creative smooth scroll
 
-	// HUD: Luminance Dock (§17–23) — §7 centralized params
+	// HUD: Luminance Dock — чуть больше иконок + скругление + блик
 	public boolean dockAdaptive = true;
-	public float dockPadding = 3f;          // inner support padding (gui px)
-	public float dockOuterPadding = 6f;     // outer refractive footprint extension
-	public float dockCornerRadius = 6f;     // Dock Corner Radius (0=пиксельная, >0 сглаженные)
-	public float dockRefraction = 0.04f;    // интенсивность внешней прослойки
-	public float dockDensity = 0.18f;       // сила readability support внутри
+	public float dockPadding = 5f;          // +2-3px к иконке, контур ниже виден
+	public float dockOuterPadding = 8f;     // внешняя прослойка шире
+	public float dockCornerRadius = 9f;     // +3px радиус, скруглённые
+	public float dockRefraction = 0.06f;    // тоньше блик по краю хорошо виден
+	public float dockDensity = 0.22f;       // плотнее для читаемости
 
 	// Compatibility: Iris (§29–34)
 	public String irisIntegration = "auto";    // auto / vanilla / iris_compat
@@ -81,16 +83,19 @@ public class LiquidumConfig {
 	public boolean debugLogging = true;
 	public boolean crashOnError = false;
 
+	// Lab UI language: auto (MC client language) / ru / en
+	public String language = "auto";
+
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
 	private static Path path() {
-		return FabricLoader.getInstance().getConfigDir().resolve("liquidum.json");
+		return LiquidumPaths.dir().resolve("liquidum.json");
 	}
 
 	public static LiquidumConfig load() {
 		try {
-			Path p = path();
-			if (Files.exists(p)) {
+			Path p = LiquidumPaths.find("liquidum.json");
+			if (p != null && Files.exists(p)) {
 				LiquidumConfig c = GSON.fromJson(Files.readString(p), LiquidumConfig.class);
 				if (c != null) {
 					return c;

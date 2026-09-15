@@ -43,3 +43,5 @@ docs/
 mappings/
 libs/
 assets/
+.log/
+net/

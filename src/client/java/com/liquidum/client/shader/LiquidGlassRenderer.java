@@ -5,6 +5,7 @@ import com.mojang.blaze3d.pipeline.RenderPipeline;
 import net.minecraft.client.renderer.RenderPipelines;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.resource.GraphicsResourceAllocator;
+import com.mojang.blaze3d.opengl.GlStateManager;
 import com.mojang.blaze3d.systems.CommandEncoder;
 import com.mojang.blaze3d.systems.GpuDevice;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -38,6 +39,9 @@ import java.util.List;
  */
 public class LiquidGlassRenderer {
 
+	public static final String BUILD_ID = "b29";
+	public static int pendingTiles() { return pendingCount; }
+
 	private static final Identifier GLASS_CHAIN_ID =
 		Identifier.fromNamespaceAndPath("liquidum", "glass");
 
@@ -54,15 +58,27 @@ public class LiquidGlassRenderer {
 	private static boolean buttonsGlass = true;
 	private static boolean hotbarGlass = true;
 	private static boolean slotsGlass = true;
+	private static boolean inventorySlotsGlass = true;
+	private static boolean healthGlass = true;
+	private static boolean hungerGlass = true;
+	private static boolean armorGlass = false;
+	private static boolean xpGlass = false;
+	private static boolean airGlass = false;
 	private static float parallaxStrength = 1.0f;
 
-	/** Sync runtime flags from the loaded config. */
+	/** Sync runtime flags — каждый компонент независимо (§T P1 изоляция). */
 	public static void applyConfig(LiquidumConfig c) {
 		enabled = c.enabled;
-		DEBUG = c.debugLogging;
+		DEBUG = c.debugLogging && LiquidumDebugState.DEBUG_BUILD;
 		buttonsGlass = c.buttonsGlass;
 		hotbarGlass = c.hotbarGlass;
 		slotsGlass = c.containerGlass;
+		inventorySlotsGlass = c.inventorySlotsGlass;
+		healthGlass = c.healthGlass;
+		hungerGlass = c.hungerGlass;
+		armorGlass = c.armorGlass;
+		xpGlass = c.xpBarGlass;
+		airGlass = c.airGlass;
 		parallaxStrength = c.parallaxStrength;
 		tabTransitionEnabled = c.tabTransition;
 		appearanceMode = switch (c.glassAppearance == null ? "auto" : c.glassAppearance.toLowerCase()) {
@@ -94,21 +110,166 @@ public class LiquidGlassRenderer {
 	}
 
 	private static void resolveGlassOutput(PostChain chain, RenderTarget main) {
-		// Persistent targets are NOT auto-sized to main by the engine. Resize
-		// ALL of them (glassout + uiprev) to match main, and re-fetch the
-		// glassout view EVERY frame (PostChain recreates textures on resize —
-		// a cached view goes stale = flat stretched colors).
+		// Engine rebuilds persistent targets from json descriptors every frame
+		// so Java resize alone never sticks: sync the descriptor sizes first
 		for (var e : ((com.liquidum.client.mixin.PostChainAccessor) chain).liquidum$getPersistentTargets().entrySet()) {
 			var t = e.getValue();
+			String path = ((Identifier) e.getKey()).getPath();
+			// Blurred mip level for frost, quarter caused cubes on villager house
+			if (path.equals("blurred")) {
+				int qw = Math.max(1, (int)(main.width * 0.65f));
+				int qh = Math.max(1, (int)(main.height * 0.65f));
+				if (t.width != qw || t.height != qh) {
+					t.resize(qw, qh);
+				}
+				syncTargetSize(chain, path, qw, qh);
+				continue;
+			}
+			// Low frequency color field at quarter resolution
+			if (path.equals("colorfield")) {
+				int cw = Math.max(1, (int)(main.width * 0.25f));
+				int ch = Math.max(1, (int)(main.height * 0.25f));
+				if (t.width != cw || t.height != ch) {
+					t.resize(cw, ch);
+				}
+				syncTargetSize(chain, path, cw, ch);
+				continue;
+			}
+			// Deep field for large glass, one eighth resolution
+			if (path.equals("deepfield")) {
+				int dw = Math.max(1, (int)(main.width * 0.125f));
+				int dh = Math.max(1, (int)(main.height * 0.125f));
+				if (t.width != dw || t.height != dh) {
+					t.resize(dw, dh);
+				}
+				syncTargetSize(chain, path, dw, dh);
+				continue;
+			}
 			if (t.width != main.width || t.height != main.height) {
 				t.resize(main.width, main.height);
 			}
-			if (((Identifier) e.getKey()).getPath().equals("glassout")) {
+			if (path.equals("glassout")) {
 				var view = t.getColorTextureView();
 				if (view != null) glassOutView = view;
 				glassOutTarget = t;
 			}
 		}
+		logMipSizes(chain, main);
+	}
+
+	private static String lastMipLog = "";
+	private static void logMipSizes(PostChain chain, RenderTarget main) {
+		try {
+			var map = ((com.liquidum.client.mixin.PostChainAccessor) chain).liquidum$getPersistentTargets();
+			String s = main.width + "x" + main.height;
+			for (String n : new String[]{"blurred", "colorfield", "deepfield"}) {
+				for (var e : map.entrySet()) {
+					String p = ((Identifier) e.getKey()).getPath();
+					if (!n.equals(p)) continue;
+					var t = e.getValue();
+					s += " " + n + "=" + t.width + "x" + t.height;
+				}
+			}
+			if (!s.equals(lastMipLog)) {
+				lastMipLog = s;
+				LiquidumMod.LOGGER.info("[glass] MIP main={}", s);
+			}
+		} catch (Exception ignored) {
+		}
+	}
+
+	// Engine sizes targets from json descriptors (orElse main size)
+	// so rewrite the record to match our resize, else it reallocates full
+	private static boolean targetSyncWarned = false;
+	private static void syncTargetSize(PostChain chain, String path, int w, int h) {
+		try {
+			var acc = ((com.liquidum.client.mixin.PostChainAccessor) chain);
+			var internals = acc.liquidum$getInternalTargets();
+			boolean need = false;
+			for (var e : internals.entrySet()) {
+				String p = ((Identifier) e.getKey()).getPath();
+				if (!path.equals(p)) continue;
+				var old = e.getValue();
+				if (old.width().orElse(-1) != w || old.height().orElse(-1) != h) need = true;
+			}
+			if (!need) return;
+			// Target map is immutable so replace it with a sized copy
+			var copy = new java.util.HashMap<>(internals);
+			for (var e : copy.entrySet()) {
+				String p = ((Identifier) e.getKey()).getPath();
+				if (!path.equals(p)) continue;
+				var old = e.getValue();
+				e.setValue(new net.minecraft.client.renderer.PostChainConfig.InternalTarget(
+					java.util.Optional.of(w), java.util.Optional.of(h), old.persistent(), old.clearColor()));
+			}
+			acc.liquidum$setInternalTargets(copy);
+		} catch (Exception ex) {
+			if (!targetSyncWarned) {
+				targetSyncWarned = true;
+				LiquidumMod.LOGGER.warn("[glass] target descriptor sync failed, mip blur stays full-res");
+			}
+		}
+	}
+
+	/** S.8 scissor union: bounds of all glass in framebuffer px (bottom-origin), padded for blur/refraction spill. */
+	private static int[] computeScissorUnion(RenderTarget main) {
+		if (pendingCount == 0 && hudPanelArea == 0 && wellCellCount == 0) return null;
+		float fw = main.width;
+		float fh = main.height;
+		float scale = fw / Math.max(1f, (float) pendingGuiW);
+		// heuristic pad: blur radius ~4.2*4=16.8fb + refraction ~3fb + rim 2fb ≈22fb
+		float pad = 22f * (scale / Math.max(1f, fw / 1920f * 4f + 1f));
+		// simpler: 24 gui px * scale (covers frost spill)
+		pad = 24f * scale;
+		float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE;
+		float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
+		boolean has = false;
+		for (int i = 0; i < pendingCount; i++) {
+			float hw = pendW[i] * 0.5f * scale;
+			float hh = pendH[i] * 0.5f * scale;
+			float cx = (pendX[i] + pendW[i] * 0.5f) * scale;
+			float cy = fh - (pendY[i] + pendH[i] * 0.5f) * scale;
+			float x0 = cx - hw, x1 = cx + hw, y0 = cy - hh, y1 = cy + hh;
+			minX = Math.min(minX, x0); maxX = Math.max(maxX, x1);
+			minY = Math.min(minY, y0); maxY = Math.max(maxY, y1);
+			has = true;
+		}
+		// Panel (if open) — hudPanelX/Y/W/H are gui px, bottom-origin conversion
+		boolean panelOpen = hudPanelArea > 0 && Minecraft.getInstance().gui.screen() instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+		if (panelOpen) {
+			float hw = hudPanelW * 0.5f * scale;
+			float hh = hudPanelH * 0.5f * scale;
+			float cx = (hudPanelX + hudPanelW * 0.5f) * scale;
+			float cy = fh - (hudPanelY + hudPanelH * 0.5f) * scale;
+			float x0 = cx - hw, x1 = cx + hw, y0 = cy - hh, y1 = cy + hh;
+			minX = has ? Math.min(minX, x0) : x0; maxX = has ? Math.max(maxX, x1) : x1;
+			minY = has ? Math.min(minY, y0) : y0; maxY = has ? Math.max(maxY, y1) : y1;
+			has = true;
+		}
+		// Well cells (fallback when pendingCount≈0 but wells exist e.g. inventory GridWell only)
+		for (int i = 0; i < wellCellCount; i++) {
+			int b = i * 4;
+			float hw = wellCells[b + 2] * 0.5f * scale;
+			float hh = wellCells[b + 3] * 0.5f * scale;
+			float cx = (wellCells[b] + wellCells[b + 2] * 0.5f) * scale;
+			float cy = fh - (wellCells[b + 1] + wellCells[b + 3] * 0.5f) * scale;
+			float x0 = cx - hw, x1 = cx + hw, y0 = cy - hh, y1 = cy + hh;
+			if (!has) { minX = x0; maxX = x1; minY = y0; maxY = y1; has = true; }
+			else { minX = Math.min(minX, x0); maxX = Math.max(maxX, x1); minY = Math.min(minY, y0); maxY = Math.max(maxY, y1); }
+		}
+		if (!has) return null;
+		minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+		// Clamp to framebuffer
+		minX = Math.max(0, minX); minY = Math.max(0, minY);
+		maxX = Math.min(fw, maxX); maxY = Math.min(fh, maxY);
+		int ix = (int) Math.floor(minX);
+		int iy = (int) Math.floor(minY);
+		int iw = (int) Math.ceil(maxX - minX);
+		int ih = (int) Math.ceil(maxY - minY);
+		if (iw <= 0 || ih <= 0) return null;
+		// Fullscreen skip: if union covers ~90% of screen, scissor is overhead
+		if (iw * ih > fw * fh * 0.90f) return null;
+		return new int[]{ ix, iy, iw, ih };
 	}
 
 	/** Called by ShaderManagerMixin after every (re)load of shader configs. */
@@ -125,6 +286,10 @@ public class LiquidGlassRenderer {
 			glassOutView = null;
 			glassOutTarget = null;
 			lastConfigs = null;
+			// F3+T must restore bliks even if light spring went NaN after 10s
+			lightDirX = 0f; lightDirY = 1f; lightDirVelX = 0f; lightDirVelY = 0f;
+			lightIntensity = 1f; lightIntensityVel = 0f; lightConfidence = 1f; lightDirNanos = 0L;
+			worldLightX = 0f; worldLightY = 1f; worldLightZ = 0f; worldVelX = 0f; worldVelY = 0f; worldVelZ = 0f;
 		}
 		currentConfigs = configs;
 	}
@@ -136,9 +301,9 @@ public class LiquidGlassRenderer {
 	 *  ванильного контейнера: chest = content + inv + hotbar = 3 wells). */
 	public static final int MAX_WELLS = 12;
 	// rects[128] + mats[128] + wells[12x3] + params + count + screen + flags
-	// + ring + grid + panel + par + anim + wellMeta + fxFlame + fxChannel + tone + dockParams + lightDir
+	// + ring + grid + panel + par + anim + wellMeta + fxFlame + fxChannel + tone + dockParams + lightDir + sun + bleed
 	private static final int GLASS_CONFIG_BYTES =
-		MAX_PANELS * 16 * 2 + MAX_WELLS * 3 * 16 + 16 * 15;
+		MAX_PANELS * 16 * 2 + MAX_WELLS * 3 * 16 + 16 * 17;
 
 	/** Set true to dump the next screen's widget classes once (diagnostics). */
 	public static boolean dumpWidgetClasses = true;
@@ -153,9 +318,13 @@ public class LiquidGlassRenderer {
 		return enabled && hotbarGlass;
 	}
 
-	/** When true, container/inventory slots get dense glass tiles. */
+	/** When true, slots get glass — раздельно для инвентаря и контейнеров. */
 	public static boolean replaceSlotTiles() {
-		return enabled && slotsGlass;
+		if (!enabled) return false;
+		var s = Minecraft.getInstance().gui.screen();
+		if (s instanceof net.minecraft.client.gui.screens.inventory.InventoryScreen) return inventorySlotsGlass;
+		if (s instanceof net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen) return inventorySlotsGlass;
+		return slotsGlass;
 	}
 
 	// ─── Creative Tab Stack: frame-capture transition ───
@@ -290,10 +459,28 @@ public class LiquidGlassRenderer {
 		if (w <= 0 || h <= 0) return;
 		appendRect(x, y, w, h, MAT_COMPANION);
 	}
-	/** Inventory BASE — тот же clear glass, что у плиток кнопок/Recipe Book, но спокойнее из-за размера. */
+
+	/** Book body rect (gui px) for tab bridging, reset every frame */
+	private static int bookX0 = 0, bookY0 = 0, bookX1 = -1, bookY1 = -1;
+
+	/** Recipe book body on layer 1, records its rect for the active tab bridge */
+	public static void submitBookPanel(int x, int y, int w, int h) {
+		if (w <= 0 || h <= 0) return;
+		bookX0 = x; bookY0 = y; bookX1 = x + w; bookY1 = y + h;
+		appendRect(x, y, w, h, MAT_COMPANION, 1.0f, 1.0f);
+	}
+
+	/** Right-edge extension so the active tab lands solid inside the book */
+	public static int tabBridge(int x, int y, int w, int h) {
+		if (bookX1 <= bookX0) return 4;
+		if (y + h <= bookY0 || y >= bookY1) return 0;
+		if (x + w >= bookX0 + 4) return 0;
+		return Math.min(12, (bookX0 + 4) - (x + w));
+	}
+	// Base sheet stays behind widgets and hotbar, never dims them
 	public static void submitBasePanel(int x, int y, int w, int h) {
 		if (w <= 0 || h <= 0) return;
-		appendRect(x, y, w, h, MAT_BASE);
+		appendRect(x, y, w, h, MAT_BASE, -1f, 0f);
 	}
 
 	private static int filterLogCount = 0;
@@ -323,9 +510,8 @@ public class LiquidGlassRenderer {
 	}
 
 	public static void submitTabTile(int x, int y, int w, int h) {
-		// Компактные вкладки (P7): визуальная форма заметно меньше
-		// vanilla-спрайта и hitbox'а — navigation chips, а не mini-panels.
-		appendRect(x + 3, y + 3, w - 6, h - 6, MAT_CONTROL);
+		// iPhone: ещё компактнее — не mini-panel, навигационный чип
+		appendRect(x + 4, y + 4, w - 8, h - 8, MAT_CONTROL);
 	}
 
 	/**
@@ -345,10 +531,10 @@ public class LiquidGlassRenderer {
 		// Выбранный рецепт: vanilla красная рамка (recipe_book/overlay*)
 		// заменяется состоянием ACTIVE того же материала.
 		if (p.startsWith("recipe_book/overlay")) return MAT_ACTIVE;
-		// Вкладки креатива: активная — BRIGHT (другое состояние стекла),
-		// неактивные — CLEAR; вся группа читается как одна система.
+		// Вкладки креатива: активная — тот же COMPANION что инвентарь (одна поверхность),
+		// неактивные — CONTROL; вся группа один слой высота 0 группа 0.
 		if (p.startsWith("container/creative_inventory/tab_")) {
-			return p.contains("selected") ? MAT_ACTIVE : MAT_CONTROL;
+			return p.contains("selected") ? MAT_COMPANION : MAT_CONTROL;
 		}
 		// Трек скроллбара креатива — тихое стекло вместо белой полосы
 		// (сам ползунок-scroller остаётся ванильным — это ручка).
@@ -360,6 +546,15 @@ public class LiquidGlassRenderer {
 	 *  НЕ входит в parallax-диапазон слотов — содержимое остаётся статичным. */
 	public static void submitSpriteTile(int x, int y, int w, int h, int mat) {
 		appendRect(x, y, w, h, mat);
+	}
+	public static void submitSpriteTile(int x, int y, int w, int h, int mat, float elev) {
+		appendRect(x, y, w, h, mat, elev);
+	}
+	public static void submitSpriteTile(int x, int y, int w, int h, int mat, float elev, float group) {
+		appendRect(x, y, w, h, mat, elev, group, 0f);
+	}
+	public static void submitSpriteTile(int x, int y, int w, int h, int mat, float elev, float group, float shapeW) {
+		appendRect(x, y, w, h, mat, elev, group, shapeW);
 	}
 
 	/** L2 FUNCTIONAL GROUP: лёгкая локальная разница яркости над BASE,
@@ -373,18 +568,22 @@ public class LiquidGlassRenderer {
 	// Vanilla widget/hitbox/click are untouched — we only cancel the full
 	// button sprite and draw a book item glyph on a subtle MAT_CONTROL body.
 	private static boolean drawingBookIcon = false;
+	private static int lastRecipeBookX = -1, lastRecipeBookY = -1, lastRecipeBookW = -1, lastRecipeBookH = -1;
+
+	public static boolean isRecipeBookButton(net.minecraft.client.gui.components.AbstractWidget w) {
+		return w != null && w.getX() == lastRecipeBookX && w.getY() == lastRecipeBookY
+			&& w.getWidth() == lastRecipeBookW && w.getHeight() == lastRecipeBookH;
+	}
 
 	public static void drawRecipeBookButton(net.minecraft.client.gui.GuiGraphicsExtractor g,
 	                                        com.mojang.blaze3d.pipeline.RenderPipeline pipeline,
 	                                        int x, int y, int w, int h, boolean hovered) {
 		if (drawingBookIcon) return;
 		drawingBookIcon = true;
+		lastRecipeBookX = x; lastRecipeBookY = y; lastRecipeBookW = w; lastRecipeBookH = h;
 		try {
-			// RECIPE BOOK BUTTON = graceful glass control + ICON ONLY (P3/P14/P34).
-			// The vanilla button sprite is NOT blitted (no baked white square); a
-			// subtle MAT_CONTROL body stays so rest/hover read as one control, and
-			// a book item glyph is drawn in its place.
-			submitSpriteTile(x, y, w, h, MAT_CONTROL);
+			// iPhone: верстак/книга — часть системы, не отдельная карточка, inset 2px
+			submitSpriteTile(x + 2, y + 2, w - 4, h - 4, MAT_CONTROL);
 			int cx = x + (w - 16) / 2;
 			int cy = y + (h - 16) / 2;
 			g.item(new ItemStack(Items.BOOK), cx, cy, 0);
@@ -402,6 +601,13 @@ public class LiquidGlassRenderer {
 	private static final java.util.List<Object[]> deferredSprites = new java.util.ArrayList<>();
 	private static final java.util.List<Object[]> deferredBlits = new java.util.ArrayList<>();
 	private static final java.util.List<Object[]> deferredTabIcons = new java.util.ArrayList<>();
+	private static final java.util.List<Object[]> deferredTexts = new java.util.ArrayList<>();
+	private static final java.util.List<Object[]> deferredHudItems = new java.util.ArrayList<>();
+	private static final java.util.List<Object[]> deferredHudDecor = new java.util.ArrayList<>();
+	private static final java.util.List<Object[]> deferredBlits9 = new java.util.ArrayList<>();
+	private static final java.util.List<Object[]> deferredSeqTexts = new java.util.ArrayList<>();
+	private static Object pendingMapDraw;
+	public static boolean isInForegroundReplay() { return inForegroundReplay; }
 
 	public static void deferBlitSprite(com.mojang.blaze3d.pipeline.RenderPipeline pipeline, net.minecraft.resources.Identifier sprite, int x, int y, int w, int h) {
 		if (deferredSprites.size() >= 32) return;
@@ -415,42 +621,157 @@ public class LiquidGlassRenderer {
 		if (deferredTabIcons.size() >= 32) return;
 		deferredTabIcons.add(new Object[]{stack.copy(), x, y, seed});
 	}
+	public static void deferText(net.minecraft.client.gui.Font font, net.minecraft.network.chat.Component text, int x, int y, int color, boolean shadow) {
+		if (deferredTexts.size() >= 32) return;
+		deferredTexts.add(new Object[]{font, text.copy(), x, y, color, shadow});
+	}
+	public static void deferHudItem(net.minecraft.world.entity.LivingEntity e, net.minecraft.world.item.ItemStack stack, int x, int y, int seed) {
+		if (deferredHudItems.size() >= 16) return;
+		deferredHudItems.add(new Object[]{e, stack.copy(), x, y, seed});
+	}
+	public static void deferHudDecor(net.minecraft.client.gui.Font font, net.minecraft.world.item.ItemStack stack, int x, int y) {
+		if (deferredHudDecor.size() >= 16) return;
+		deferredHudDecor.add(new Object[]{font, stack.copy(), x, y});
+	}
+	public static void deferBlitSprite9(com.mojang.blaze3d.pipeline.RenderPipeline pipeline, net.minecraft.resources.Identifier sprite,
+	                                    int u0, int v0, int sw, int sh, int x, int y, int w, int h) {
+		if (deferredBlits9.size() >= 32) return;
+		deferredBlits9.add(new Object[]{pipeline, sprite, u0, v0, sw, sh, x, y, w, h});
+	}
+	public static void deferSeqText(net.minecraft.client.gui.Font font, net.minecraft.util.FormattedCharSequence text, int x, int y, int color, boolean shadow) {
+		if (deferredSeqTexts.size() >= 32) return;
+		deferredSeqTexts.add(new Object[]{font, text, x, y, color, shadow});
+	}
+	public static void captureMap(net.minecraft.client.renderer.state.MapRenderState state) {
+		pendingMapDraw = state;
+	}
+	public static final int SHAPE_HEART = 3;
+	public static final int SHAPE_MEAT = 4;
+	private static final long[] iconKeys = new long[64];
+	private static int iconKeyCount = 0;
+	// Icon glass follows the sprite halo, rim only without frost
+	public static void submitIconTile(int x, int y, int w, int h, int shape) {
+		if (!enabled || !luminanceDockEnabled) return;
+		if (shape == SHAPE_HEART && !healthGlass) return;
+		if (shape == SHAPE_MEAT && !hungerGlass) return;
+		if (shape == 0 && !armorGlass) return;
+		if (shape == 2 && !airGlass) return;
+		long key = ((long) x << 32) | (y & 0xffffffffL);
+		for (int i = 0; i < iconKeyCount; i++) if (iconKeys[i] == key) return;
+		if (iconKeyCount >= iconKeys.length) return;
+		iconKeys[iconKeyCount++] = key;
+		appendRect(x - 1, y - 1, w + 2, h + 2, MAT_DOCK, 0f, 0f, (float) shape);
+	}
+	public static void replayHudBar(net.minecraft.client.gui.GuiGraphicsExtractor g) {
+		if (deferredHudItems.isEmpty() && deferredHudDecor.isEmpty()) return;
+		boolean old = inForegroundReplay;
+		inForegroundReplay = true;
+		try {
+			boolean show = hotbarCollapse < 0.5f;
+			if (show && !deferredHudItems.isEmpty()) LiquidumLayers.beginItems(g);
+			for (Object[] a : deferredHudItems) {
+				if (!show) break;
+				// Buttons sit above items, clipped ones stay under blurred glass
+				int ix = (Integer) a[2], iy = (Integer) a[3];
+				if (clipHudUnderButtons() && isUnderElevatedTile(ix, iy, 16, 16)) continue;
+				g.item((net.minecraft.world.entity.LivingEntity) a[0], (net.minecraft.world.item.ItemStack) a[1], (Integer) a[2], (Integer) a[3], (Integer) a[4]);
+			}
+			if (show && !deferredHudDecor.isEmpty()) LiquidumLayers.beginText(g);
+			for (Object[] a : deferredHudDecor) {
+				if (!show) break;
+				int ix = (Integer) a[2], iy = (Integer) a[3];
+				if (clipHudUnderButtons() && isUnderElevatedTile(ix, iy, 16, 16)) continue;
+				g.itemDecorations((net.minecraft.client.gui.Font) a[0], (net.minecraft.world.item.ItemStack) a[1], (Integer) a[2], (Integer) a[3]);
+			}
+			// Ring only over our glass bar, never over the vanilla bar
+			if (show && hudTilesFrom >= 0) drawHotbarSelection(g);
+		} finally {
+			inForegroundReplay = old;
+			deferredHudItems.clear();
+			deferredHudDecor.clear();
+		}
+	}
 	public static void replayDeferredSprites(net.minecraft.client.gui.GuiGraphicsExtractor g) {
-		if (deferredSprites.isEmpty() && deferredBlits.isEmpty() && deferredTabIcons.isEmpty()) return;
-		if (!deferForeground()) {
-			// Still clear to avoid leak when gate closed
-			deferredSprites.clear(); deferredBlits.clear(); deferredTabIcons.clear();
+		if (deferredSprites.isEmpty() && deferredBlits.isEmpty() && deferredBlits9.isEmpty() && deferredTabIcons.isEmpty() && deferredTexts.isEmpty() && deferredSeqTexts.isEmpty() && pendingMapDraw == null && deferredHudItems.isEmpty() && deferredHudDecor.isEmpty()) return;
+		boolean canFg = deferForeground();
+		boolean canHud = !deferredHudItems.isEmpty() || !deferredHudDecor.isEmpty();
+		if (!canFg && !canHud) {
+			deferredSprites.clear(); deferredBlits.clear(); deferredBlits9.clear(); deferredTabIcons.clear(); deferredTexts.clear();
+			deferredSeqTexts.clear(); pendingMapDraw = null;
+			deferredHudItems.clear(); deferredHudDecor.clear();
 			return;
 		}
 		boolean old = inForegroundReplay;
 		inForegroundReplay = true;
 		try {
+			if (canFg && (!deferredSprites.isEmpty() || !deferredBlits.isEmpty())) LiquidumLayers.beginInventoryObjects(g);
+			if (canFg) {
 			for (Object[] a : deferredSprites) {
 				g.blitSprite((com.mojang.blaze3d.pipeline.RenderPipeline) a[0], (net.minecraft.resources.Identifier) a[1], (Integer) a[2], (Integer) a[3], (Integer) a[4], (Integer) a[5]);
 			}
 			for (Object[] a : deferredBlits) {
 				g.blit((com.mojang.blaze3d.pipeline.RenderPipeline) a[0], (net.minecraft.resources.Identifier) a[1], (Integer) a[2], (Integer) a[3], (Float) a[4], (Float) a[5], (Integer) a[6], (Integer) a[7], (Integer) a[8], (Integer) a[9]);
 			}
+			for (Object[] a : deferredBlits9) {
+				g.blitSprite((com.mojang.blaze3d.pipeline.RenderPipeline) a[0], (net.minecraft.resources.Identifier) a[1], (Integer) a[2], (Integer) a[3], (Integer) a[4], (Integer) a[5], (Integer) a[6], (Integer) a[7], (Integer) a[8], (Integer) a[9]);
+			}
+			if (pendingMapDraw != null) {
+				g.map((net.minecraft.client.renderer.state.MapRenderState) pendingMapDraw);
+			}
+			}
+			if (canFg && !deferredTabIcons.isEmpty()) LiquidumLayers.beginItems(g);
+			if (canFg) {
 			for (Object[] a : deferredTabIcons) {
 				g.item((net.minecraft.world.item.ItemStack) a[0], (Integer) a[1], (Integer) a[2], (Integer) a[3]);
 			}
+			}
+		if (canHud && hotbarCollapse < 0.5f && !deferredHudItems.isEmpty()) LiquidumLayers.beginItems(g);
+		for (Object[] a : deferredHudItems) {
+			if (hotbarCollapse >= 0.5f) break;
+			int ix = (Integer) a[2], iy = (Integer) a[3];
+			if (clipHudUnderButtons() && isUnderElevatedTile(ix, iy, 16, 16)) continue;
+			g.item((net.minecraft.world.entity.LivingEntity) a[0], (net.minecraft.world.item.ItemStack) a[1], (Integer) a[2], (Integer) a[3], (Integer) a[4]);
+		}
+			if (canFg && (!deferredTexts.isEmpty() || !deferredSeqTexts.isEmpty())) LiquidumLayers.beginText(g);
+			if (canFg) {
+			for (Object[] a : deferredTexts) {
+				g.text((net.minecraft.client.gui.Font) a[0], (net.minecraft.network.chat.Component) a[1], (Integer) a[2], (Integer) a[3], (Integer) a[4], (Boolean) a[5]);
+			}
+			for (Object[] a : deferredSeqTexts) {
+				g.text((net.minecraft.client.gui.Font) a[0], (net.minecraft.util.FormattedCharSequence) a[1], (Integer) a[2], (Integer) a[3], (Integer) a[4], (Boolean) a[5]);
+			}
+			}
+		if (canHud && hotbarCollapse < 0.5f && !deferredHudDecor.isEmpty()) LiquidumLayers.beginText(g);
+		for (Object[] a : deferredHudDecor) {
+			if (hotbarCollapse >= 0.5f) break;
+			int ix = (Integer) a[2], iy = (Integer) a[3];
+			if (clipHudUnderButtons() && isUnderElevatedTile(ix, iy, 16, 16)) continue;
+			g.itemDecorations((net.minecraft.client.gui.Font) a[0], (net.minecraft.world.item.ItemStack) a[1], (Integer) a[2], (Integer) a[3]);
+		}
 		} finally {
 			inForegroundReplay = old;
 			deferredSprites.clear();
 			deferredBlits.clear();
+			deferredBlits9.clear();
 			deferredTabIcons.clear();
+			deferredTexts.clear();
+			deferredSeqTexts.clear();
+			pendingMapDraw = null;
+			deferredHudItems.clear();
+			deferredHudDecor.clear();
+			iconKeyCount = 0;
 		}
 	}
 
 	private static final float[] wells = new float[MAX_WELLS * 12];
 	private static int wellCount = 0;
 	
-	public static void submitGridWell(int x, int y, int cellW, int cellH,
+	public static boolean submitGridWell(int x, int y, int cellW, int cellH,
 	                                  int pitchX, int pitchY, int cols, int rows, int hover) {
-		if (wellCount >= MAX_WELLS || cols <= 0 || rows <= 0) return;
+		if (wellCount >= MAX_WELLS || cols <= 0 || rows <= 0) return false;
 		if (wellCellCount + cols * rows > wellCells.length / 4) {
 			// Not enough parallax slots — skip this well entirely to keep UBO/wellCells in sync
-			return;
+			return false;
 		}
 		int o = wellCount++ * 12;
 		wells[o] = x; wells[o + 1] = y;
@@ -470,10 +791,11 @@ public class LiquidGlassRenderer {
 				wellCellCount++;
 			}
 		}
+		return true;
 	}
 
-	/** Ячейки GridWell для itemParallax: {x,y,w,h} на ячейку. */
-	private static final int[] wellCells = new int[256 * 4];
+	/** Ячейки GridWell для itemParallax: {x,y,w,h} на ячейку. S.13 512 для больших креатив-сеток. */
+	private static final int[] wellCells = new int[512 * 4];
 	private static int wellCellCount = 0;
 
 	// Furnace FX: flame spill + ProcessChannel (координаты gui px).
@@ -525,18 +847,204 @@ public class LiquidGlassRenderer {
 		}
 		darkLastNanos = now;
 	}
+	private static long lightDirNanos = 0L;
 	private static void updateLightDir(Minecraft mc) {
-		if (mc.level == null) { lightDirX = 0f; lightDirY = 1f; lightIntensity = 1f; return; }
-		// Fixed top light for now — sun angle not available in 26.x mappings without reflection.
-		// Intensity still reacts to skyDarken / darkSmooth so rim dim in darkness.
-		float sky = 1f - mc.level.getSkyDarken() / 15f;
-		lightIntensity = 0.4f + 0.6f * sky * (1f - darkSmooth * 0.5f);
-		lightDirX = 0f; lightDirY = 1f;
-		if (mc.level.dimension() == net.minecraft.world.level.Level.NETHER || mc.level.dimension() == net.minecraft.world.level.Level.END) {
-			lightIntensity = 0.5f;
+		// Manual light wins, Lab sculpts the rim without the world
+		if (LiquidumDebugState.lightManual) {
+			lightDirX = (float) Math.cos(LiquidumDebugState.lightAngle);
+			lightDirY = (float) Math.sin(LiquidumDebugState.lightAngle);
+			lightIntensity = Math.max(0f, Math.min(1f, LiquidumDebugState.lightLevel));
+			lightConfidence = 1f;
+			smoothSun(lightIntensity, lightIntensity * 0.98f, lightIntensity * 0.94f);
+			return;
 		}
+		if (mc.level == null) { lightDirX = 0f; lightDirY = 1f; lightIntensity = 0.18f; lightConfidence = 0.28f; worldLightX = 0f; worldLightY = 1f; worldLightZ = 0f; worldVelX=0f; worldVelY=0f; worldVelZ=0f; filteredWx=0f; filteredWy=1f; filteredWz=0f; smoothSun(0.50f, 0.58f, 0.75f); return; }
+		long now = System.nanoTime();
+		float dt = lightDirNanos == 0 ? 0.016f : Math.min((now - lightDirNanos)/1e9f, 1f/30f);
+		lightDirNanos = now;
+		float blockWeight = 0f, skyWeight = 0f;
+		float targetInt = 0f;
+		float rawWx = 0f, rawWy = 1f, rawWz = 0f;
+		float blockLenN = 0f, skyLenN = 0f;
+		float confRaw = 0.28f;
+		try {
+			var player = mc.player;
+			var level = mc.level;
+			if (player != null) {
+				var pos = player.blockPosition();
+				java.util.function.Function<net.minecraft.core.BlockPos, Float> sampleBlock = p2 -> {
+					try { return (float) level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, p2) / 15f; }
+					catch (Exception ex) { try { return (float) level.getMaxLocalRawBrightness(p2) / 15f; } catch (Exception e2) { return 0f; } }
+				};
+				java.util.function.Function<net.minecraft.core.BlockPos, Float> sampleSky = p2 -> {
+					try { return (float) level.getBrightness(net.minecraft.world.level.LightLayer.SKY, p2) / 15f; }
+					catch (Exception ex) { return 0f; }
+				};
+				float bx1 = sampleBlock.apply(pos.east()), bx0 = sampleBlock.apply(pos.west());
+				float by1 = sampleBlock.apply(pos.above()), by0 = sampleBlock.apply(pos.below());
+				float bz1 = sampleBlock.apply(pos.south()), bz0 = sampleBlock.apply(pos.north());
+				float sx1 = sampleSky.apply(pos.east()), sx0 = sampleSky.apply(pos.west());
+				float sy1 = sampleSky.apply(pos.above()), sy0 = sampleSky.apply(pos.below());
+				float sz1 = sampleSky.apply(pos.south()), sz0 = sampleSky.apply(pos.north());
+				float gbx = bx1 - bx0, gby = by1 - by0, gbz = bz1 - bz0;
+				float gsx = sx1 - sx0, gsy = sy1 - sy0, gsz = sz1 - sz0;
+				float bx1_2 = sampleBlock.apply(pos.east(2)), bx0_2 = sampleBlock.apply(pos.west(2));
+				float by1_2 = sampleBlock.apply(pos.above(2)), by0_2 = sampleBlock.apply(pos.below(2));
+				float bz1_2 = sampleBlock.apply(pos.south(2)), bz0_2 = sampleBlock.apply(pos.north(2));
+				gbx = gbx * 0.65f + (bx1_2 - bx0_2) * 0.35f;
+				gby = gby * 0.65f + (by1_2 - by0_2) * 0.35f;
+				gbz = gbz * 0.65f + (bz1_2 - bz0_2) * 0.35f;
+				gsx = gsx * 0.65f + (sampleSky.apply(pos.east(2)) - sampleSky.apply(pos.west(2))) * 0.35f;
+				gsy = gsy * 0.65f + (sampleSky.apply(pos.above(2)) - sampleSky.apply(pos.below(2))) * 0.35f;
+				gsz = gsz * 0.65f + (sampleSky.apply(pos.south(2)) - sampleSky.apply(pos.north(2))) * 0.35f;
+				blockLenN = (float)Math.sqrt(gbx*gbx + gby*gby + gbz*gbz);
+				skyLenN = (float)Math.sqrt(gsx*gsx + gsy*gsy + gsz*gsz);
+				float skyDark = level.getSkyDarken() / 15f;
+				float skyFactor = 1f - skyDark;
+				float sunAngle = 0f;
+				try {
+					try { var m = level.getClass().getMethod("getSunAngle", float.class); sunAngle = ((Number)m.invoke(level, 0f)).floatValue() * 2f * (float)Math.PI; }
+					catch (Exception e2) { var m2 = level.getClass().getMethod("getTimeOfDay", long.class); sunAngle = ((Number)m2.invoke(level, 0L)).floatValue() / 24000f * 2f * (float)Math.PI; }
+				} catch (Exception ignored) {}
+				float sunX = (float)Math.cos(sunAngle) * 0.3f;
+				float sunY = (float)Math.sin(sunAngle) * 0.9f + 0.3f;
+				float sunZ = 0f;
+				skyWeight = skyFactor * (0.7f + 0.3f * skyLenN);
+				blockWeight = (1f - skyFactor * 0.6f) * (0.6f + 0.4f * blockLenN);
+				if (level.dimension() == net.minecraft.world.level.Level.NETHER || level.dimension() == net.minecraft.world.level.Level.END) {
+					skyWeight = 0f; blockWeight = 1f; sunX = 0f; sunY = -1f; sunZ = 0f;
+				}
+				float wx = sunX * skyWeight + (blockLenN > 1e-4f ? gbx / blockLenN * blockWeight : 0f);
+				float wy = sunY * skyWeight + (blockLenN > 1e-4f ? gby / blockLenN * blockWeight : 0f);
+				float wz = sunZ * skyWeight + (blockLenN > 1e-4f ? gbz / blockLenN * blockWeight : 0f);
+				float wlen = (float)Math.sqrt(wx*wx + wy*wy + wz*wz);
+				if (wlen > 1e-4f) { wx/=wlen; wy/=wlen; wz/=wlen; }
+				else { wx = worldLightX; wy = worldLightY; wz = worldLightZ; }
+				// 80-120ms low-pass before spring (ChatGPT) — smooth discrete 0-15 steps
+			float lpA = 1f - (float)Math.exp(-dt / 0.10f);
+			filteredWx += (wx - filteredWx) * lpA;
+			filteredWy += (wy - filteredWy) * lpA;
+			filteredWz += (wz - filteredWz) * lpA;
+			rawWx = filteredWx; rawWy = filteredWy; rawWz = filteredWz;
+				float gradLen = (float)Math.sqrt(gbx*gbx+gby*gby+gbz*gbz + gsx*gsx+gsy*gsy+gsz*gsz);
+				float c = Math.min(1f, gradLen * 2.5f);
+				c = Math.max(0.08f, c);
+				if (skyWeight < 0.15f && blockLenN < 0.08f) c = Math.max(0.06f, c * 0.45f);
+				confRaw = c;
+				float skyInt = 1f - skyDark;
+				float localBlock = sampleBlock.apply(pos);
+				targetInt = 0.08f + 0.92f * Math.max(skyInt, localBlock);
+				targetInt *= (0.35f + 0.65f * c);
+				updateSunTarget(level, sunX, sunY, skyWeight, blockWeight, localBlock, targetInt);
+			} else {
+				rawWx = 0f; rawWy = 1f; rawWz = 0f;
+				smoothSun(0.55f, 0.62f, 0.80f);
+			}
+		} catch (Exception e) {
+			rawWx = 0f; rawWy = 1f; rawWz = 0f;
+			targetInt = 0.08f + 0.92f * (1f - mc.level.getSkyDarken()/15f) * 0.9f;
+			confRaw = 0.28f;
+			smoothSun(0.70f, 0.75f, 0.85f);
+		}
+		boolean weak = blockLenN < 0.08f && skyLenN < 0.07f;
+		if (!weak) {
+			float omega = 10.0f, zeta = 0.98f;
+			float ax = omega*omega*(rawWx - worldLightX) - 2f*zeta*omega*worldVelX;
+			float ay = omega*omega*(rawWy - worldLightY) - 2f*zeta*omega*worldVelY;
+			float az = omega*omega*(rawWz - worldLightZ) - 2f*zeta*omega*worldVelZ;
+			worldVelX += ax * dt; worldVelY += ay * dt; worldVelZ += az * dt;
+			worldLightX += worldVelX * dt; worldLightY += worldVelY * dt; worldLightZ += worldVelZ * dt;
+			float wl = (float)Math.sqrt(worldLightX*worldLightX + worldLightY*worldLightY + worldLightZ*worldLightZ);
+			if (wl > 1e-4f) { worldLightX/=wl; worldLightY/=wl; worldLightZ/=wl; }
+			if (Float.isNaN(worldLightX) || Float.isInfinite(worldLightX)) { worldLightX=rawWx; worldLightY=rawWy; worldLightZ=rawWz; worldVelX=0; worldVelY=0; worldVelZ=0; }
+		} else {
+			worldVelX *= 0.92f; worldVelY *= 0.92f; worldVelZ *= 0.92f;
+		}
+		{
+			float omegaI = 10.0f, zetaI = 0.98f;
+			float ai = omegaI*omegaI*(targetInt - lightIntensity) - 2f*zetaI*omegaI*lightIntensityVel;
+			lightIntensityVel += ai * dt;
+			lightIntensity += lightIntensityVel * dt;
+			lightIntensity = Math.max(0f, Math.min(1f, lightIntensity));
+			if (Float.isNaN(lightIntensity)) { lightIntensity = targetInt; lightIntensityVel=0; }
+		}
+		lightConfidence = confRaw;
+		float tx = 0f, ty = 1f;
+		try {
+			var cam = mc.gameRenderer.mainCamera();
+			if (cam != null) {
+				org.joml.Vector3f right = new org.joml.Vector3f(1,0,0), up = new org.joml.Vector3f(0,1,0);
+				try { Object r = cam.getClass().getMethod("getRightVector").invoke(cam); if (r instanceof org.joml.Vector3f) right=(org.joml.Vector3f)r; else if (r instanceof org.joml.Vector3fc) right=new org.joml.Vector3f((org.joml.Vector3fc)r);} catch(Exception e){ try{Object r2=cam.getClass().getMethod("rightVector").invoke(cam); if(r2 instanceof org.joml.Vector3f) right=(org.joml.Vector3f)r2;}catch(Exception ex){}}
+				try { Object u = cam.getClass().getMethod("getUpVector").invoke(cam); if (u instanceof org.joml.Vector3f) up=(org.joml.Vector3f)u; else if (u instanceof org.joml.Vector3fc) up=new org.joml.Vector3f((org.joml.Vector3fc)u);} catch(Exception e){ try{Object u2=cam.getClass().getMethod("upVector").invoke(cam); if(u2 instanceof org.joml.Vector3f) up=(org.joml.Vector3f)u2;}catch(Exception ex){} try{Object f=cam.getClass().getMethod("forwardVector").invoke(cam); if(f instanceof org.joml.Vector3f){var fwd=(org.joml.Vector3f)f; right=new org.joml.Vector3f(fwd).cross(new org.joml.Vector3f(0,1,0)).normalize(); up=new org.joml.Vector3f(right).cross(fwd).normalize();}}catch(Exception ex2){}}
+				tx = worldLightX * right.x() + worldLightY * right.y() + worldLightZ * right.z();
+				ty = worldLightX * up.x() + worldLightY * up.y() + worldLightZ * up.z();
+				float tlen=(float)Math.sqrt(tx*tx+ty*ty); if(tlen>1e-4f){tx/=tlen; ty/=tlen;}
+			}
+		} catch(Exception ignored){ tx=worldLightX; ty=worldLightY; }
+		lightDirX = tx; lightDirY = ty;
+		if (Float.isNaN(lightDirX)||Float.isInfinite(lightDirX)) { lightDirX=0f; lightDirY=1f; }
 	}
 
+	private static float clamp01(float v) {
+		return v < 0f ? 0f : (v > 1f ? 1f : v);
+	}
+
+	/** Exponential smoothing for the WOW sun colour (no popping at sunset). */
+	private static void smoothSun(float r, float g, float b) {
+		long now = System.nanoTime();
+		if (sunNanos == 0L) {
+			sunR = r; sunG = g; sunB = b; sunNanos = now;
+			return;
+		}
+		float dt = Math.min((now - sunNanos) / 1e9f, 0.1f);
+		sunNanos = now;
+		float k = 1f - (float) Math.exp(-3.0 * dt);
+		sunR += (r - sunR) * k;
+		sunG += (g - sunG) * k;
+		sunB += (b - sunB) * k;
+	}
+
+	/**
+	 * WOW sun colour target: noon white → horizon orange → moonlight blue,
+	 * torch/lava warmth where block light dominates, Nether red / End violet.
+	 * Brightness follows targetInt so the specular dies at night instead of
+	 * glowing white in the dark.
+	 */
+	private static void updateSunTarget(Object level, float sunX, float sunY,
+										float skyWeight, float blockWeight,
+										float localBlock, float targetInt) {
+		boolean nether = false, end = false;
+		try {
+			var dim = ((net.minecraft.world.level.Level) level).dimension();
+			nether = dim == net.minecraft.world.level.Level.NETHER;
+			end = dim == net.minecraft.world.level.Level.END;
+		} catch (Exception ignored) {}
+		float tr, tg, tb;
+		if (nether) {
+			tr = 1f; tg = 0.42f; tb = 0.22f;
+		} else if (end) {
+			tr = 0.72f; tg = 0.58f; tb = 1f;
+		} else {
+			float elev = Math.max(-1f, Math.min(1f, sunY));
+			float dayT = clamp01((elev + 0.12f) / 0.6f);
+			float lowT = clamp01(1f - Math.abs(elev - 0.12f) / 0.35f);
+			tr = 0.55f + 0.45f * dayT;
+			tg = 0.65f + 0.33f * dayT;
+			tb = 0.90f + 0.04f * dayT;
+			tr += (1f - tr) * lowT * 0.9f;
+			tg *= 1f - lowT * 0.35f;
+			tb *= 1f - lowT * 0.62f;
+			float bw = blockWeight / (blockWeight + skyWeight + 1e-4f);
+			float torch = bw * clamp01(localBlock * 1.2f);
+			tr += (1f - tr) * torch * 0.85f;
+			tg += (0.60f - tg) * torch * 0.7f;
+			tb += (0.30f - tb) * torch * 0.7f;
+		}
+		float lum = 0.25f + 0.75f * clamp01(targetInt);
+		smoothSun(tr * lum, tg * lum, tb * lum);
+	}
+
+	/** Площадь panel-rect текущего кадра (для cap групп semantic adapter). */
 	/** Площадь panel-rect текущего кадра (для cap групп semantic adapter). */
 	public static int panelArea() {
 		return hudPanelArea;
@@ -551,12 +1059,20 @@ public class LiquidGlassRenderer {
 
 	/** Откладывать ли foreground-модели: только когда стекло реально
 	 *  заменяет фон контейнерного экрана. Во время replay — НИКОГДА
-	 *  (иначе mixin отменяет собственное переигрывание). */
+	 *  (иначе mixin отменяет собственное переигрывание). §B: для креатива
+	 *  проверяем inventorySlotsGlass, а не containerGlass, иначе нижние табы
+	 *  уходили под стекло (мылились). */
 	public static boolean deferForeground() {
 		if (inForegroundReplay) return false;
-		if (!enabled || !slotsGlass) return false;
+		if (!enabled) return false;
 		var s = Minecraft.getInstance().gui.screen();
-		return s instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+		if (!(s instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return false;
+		// Per-screen glass gate (§T P1 изоляция): creative/inventory use inventorySlotsGlass
+		if (s instanceof net.minecraft.client.gui.screens.inventory.InventoryScreen
+			|| s instanceof net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen) {
+			return inventorySlotsGlass;
+		}
+		return slotsGlass;
 	}
 
 	private static Object[] pendingEntityDraw;
@@ -676,7 +1192,7 @@ public class LiquidGlassRenderer {
 			float px = wells[o + 4], py = wells[o + 5];
 			for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++) {
 				int cx = (int) (ox + c * px);
-				int cy = (int) (oy - r * py);
+				int cy = (int) (oy + r * py);
 				cross(g, cx, cy, s, 0xFF36E036);
 			}
 		}
@@ -688,32 +1204,86 @@ public class LiquidGlassRenderer {
 	}
 
 
+	// Home strip morph: 0 full bar, 1 iPhone strip, smoothed every submit
+	private static float hotbarCollapse = 0f;
+	private static long hotbarCollapseNanos = 0L;
+
+	// Pause and Done sheets collapse the bar, game and chat keep it full
+	private static boolean hotbarMinimizedTarget() {
+		var s = Minecraft.getInstance().gui.screen();
+		if (s instanceof net.minecraft.client.gui.screens.PauseScreen) return true;
+		if (s instanceof net.minecraft.client.gui.screens.options.OptionsScreen) return true;
+		return s instanceof net.minecraft.client.gui.screens.options.OptionsSubScreen;
+	}
+
 	/** Vanilla hotbar geometry: solid 182x22 panel (same footprint as vanilla),
-	 *  offhand tile on the LEFT when holding an item. Selected slot ring
-	 *  (uMeta.w/z) glides between slots. §12-14: в Spectator/MainMenu/HideGUI
-	 *  Liquidum hotbar и его wells/кольцо не существуют; в Creative — остаётся (§1). */
+	 *  selected cell reads as a slot well, offhand tile on the LEFT.
+	 *  §12-14: no hotbar in Spectator/MainMenu/HideGUI, Creative keeps it (§1). */
 	public static void submitHotbar(int guiW, int guiH, int selSlot, boolean hasOffhand) {
 		if (!replaceHotbarBackground()) return;
-		if (!shouldRenderHud()) return;
+		if (!shouldRenderHotbarEdge()) return;
 		var mcH = Minecraft.getInstance();
 		if (mcH.player != null && mcH.player.isSpectator()) return; // §13 (Creative hotbar остаётся per P0 §1)
 		if (mcH.level == null) return; // §14
+		long now = System.nanoTime();
+		float want = hotbarMinimizedTarget() ? 1f : 0f;
+		if (hotbarCollapseNanos == 0L) hotbarCollapse = want;
+		else {
+			float dt = Math.min((now - hotbarCollapseNanos) / 1e9f, 0.1f);
+			hotbarCollapse += (want - hotbarCollapse) * (1f - (float) Math.exp(-12.0 * dt));
+			if (Math.abs(want - hotbarCollapse) < 0.002f) hotbarCollapse = want;
+		}
+		hotbarCollapseNanos = now;
+		float k = hotbarCollapse;
 		pendingGuiW = Math.max(1, guiW);
 		pendingGuiH = Math.max(1, guiH);
 		if (hudTilesFrom < 0) hudTilesFrom = pendingCount;
-		int x0 = guiW / 2 - 91;
-		int y0 = guiH - 23;
-		if (hasOffhand) {
-			appendRect(x0 - 30, y0, 24, 22, MAT_SLOT);            // offhand: LEFT, centred on the item
+		float fx = guiW / 2 - 91, fy = guiH - 22;
+		float sx = guiW / 2f - 55, sy = guiH - 9;
+		int x0 = Math.round(fx + (sx - fx) * k);
+		int y0 = Math.round(fy + (sy - fy) * k);
+		int bw = Math.round(182 + (110 - 182) * k);
+		int bh = Math.max(2, Math.round(22 + (4 - 22) * k));
+		boolean full = k < 0.5f;
+		if (full && hasOffhand) {
+			appendRect(Math.round(fx) - 30, Math.round(fy), 24, 22, MAT_SLOT);            // offhand: LEFT, centred on the item
 		}
 		// Hotbar — часть той же mask-системы, что Dock (§17): Inner+Outer из одной SDF,
 		// но пока подаётся как MAT_DENSE (плотный), профиль подчинится dock outer в шейдере
-		appendRect(x0, y0, 182, 22, MAT_DENSE);               // bar: vanilla footprint
-		// Animated ring target (fb px); -1 = no selection this frame.
-		// Vanilla slot grid: slot i spans [x0+1+20i, x0+21+20i].
-		float scl = ((float) mainW() / pendingGuiW);
-		hudSelTargetX = selSlot < 0 ? -1f : (x0 + 11 + selSlot * 20) * scl;
+		appendRect(x0, y0, bw, bh, full ? MAT_DENSE : MAT_ACTIVE);
+		hudSelTargetX = -1f;
 		hudSelCenterYGui = y0 + 11;
+		// Selected cell is a real slot well, it covers the bar body
+		if (full && selSlot >= 0 && selSlot < 9) {
+			submitSlotWell(Math.round(fx) + 2 + selSlot * 20, Math.round(fy) + 2);
+		}
+	}
+
+	// Soft white frame for the selected hotbar cell
+	// White ring glide state, exponential smoothing like hudSelX
+	private static float selRingX = -1f;
+	private static long selRingNanos = 0L;
+
+	public static void drawHotbarSelection(net.minecraft.client.gui.GuiGraphicsExtractor g) {
+		if (!replaceHotbarBackground()) return;
+		if (hotbarCollapse >= 0.5f) return;
+		var mc = Minecraft.getInstance();
+		if (mc.level == null || mc.player == null || mc.player.isSpectator()) return;
+		int sel = mc.player.getInventory().getSelectedSlot();
+		if (sel < 0 || sel > 8) return;
+		float tx = g.guiWidth() / 2 - 89 + sel * 20;
+		long now = System.nanoTime();
+		if (selRingX < 0 || selRingNanos == 0L) selRingX = tx;
+		else {
+			float dt = Math.min((now - selRingNanos) / 1e9f, 0.1f);
+			selRingX += (tx - selRingX) * (1f - (float) Math.exp(-14.0 * dt));
+			if (Math.abs(tx - selRingX) < 0.05f) selRingX = tx;
+		}
+		selRingNanos = now;
+		int cx = Math.round(selRingX);
+		int cy = g.guiHeight() - 22 + 2;
+		ring(g, cx - 1, cy - 1, 20, 20, 1, 0x88FFFFFF);
+		ring(g, cx, cy, 18, 18, 1, 0xFFFFFFFF);
 	}
 
 	private static boolean isHideGui() {
@@ -728,10 +1298,21 @@ public class LiquidGlassRenderer {
 	private static boolean shouldRenderHud() {
 		var mc = Minecraft.getInstance();
 		if (mc.level == null) return false;
-		if (mc.gui.screen() != null) return false;
 		if (isHideGui()) return false;
 		var p = mc.player;
 		if (p == null) return false;
+		var s = mc.gui.screen();
+		if (s instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen) return false;
+		return true;
+	}
+
+	public static boolean shouldRenderHotbarEdge() {
+		var mc = Minecraft.getInstance();
+		if (mc.level == null) return false;
+		if (isHideGui()) return false;
+		var p = mc.player;
+		if (p == null) return false;
+		if (p.isSpectator()) return false;
 		return true;
 	}
 
@@ -741,8 +1322,8 @@ public class LiquidGlassRenderer {
 		var mc = Minecraft.getInstance();
 		var p = mc.player;
 		if (p == null) return;
-		// §10-11: повторять то, что Minecraft реально решил нарисовать (vanilla visibility)
-		// Creative/Spectator — survival Dock off (§11,13), но XP/jump/mount — по своим правилам
+		// §T P1 изоляция: каждый Dock-элемент — свой toggle, без кросс-поломок как у ReGlass #9
+		if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(mc.gui.screen())) return;
 		boolean isCreative = p.isCreative();
 		boolean isSpectator = p.isSpectator();
 		if (isSpectator) return; // §13
@@ -751,64 +1332,28 @@ public class LiquidGlassRenderer {
 		if (hudTilesFrom < 0) hudTilesFrom = pendingCount;
 		int hw = guiW / 2;
 		int hh = guiH;
-		int pad = Math.round(dockPadding);
-		// Left group: hearts + armor — только если vanilla их рисует (§10)
-		boolean canHurt = true;
-		try { canHurt = mc.gameMode != null && mc.gameMode.canHurtPlayer(); } catch (Exception ignored) {}
-		if (!isCreative && canHurt) {
-			boolean hasArmor = p.getArmorValue() > 0;
-			boolean hasMount = false;
-			try { var v = p.getVehicle(); hasMount = v instanceof net.minecraft.world.entity.LivingEntity; } catch (Exception ignored) {}
-			int healthX = hw - 91 - pad;
-			int healthY = hh - 39 - pad;
-			int healthW = 86 + pad * 2;
-			int healthH = 12 + pad * 2;
-			// Health row always (if canHurt)
-			appendRect(healthX, healthY, healthW, healthH, MAT_DOCK);
-			// Armor/mount row — only when present, width based on actual icons (§9-11, shape not bbox)
-			if (hasArmor || hasMount) {
-				int armorIcons = hasArmor ? (p.getArmorValue() + 1) / 2 : 0;
-				// mount health icons: use mount's health max /2
-				if (hasMount) {
-					try {
-						var le = (net.minecraft.world.entity.LivingEntity) p.getVehicle();
-						armorIcons = Math.max(armorIcons, (int) Math.ceil(le.getMaxHealth() / 2f));
-					} catch (Exception ignored) {}
-				}
-				armorIcons = Math.min(armorIcons, 10);
-				int armorW = Math.max(12 + pad*2, armorIcons * 8 + pad*2 + 2);
-				int armorX = hw - 91 - pad;
-				int armorY = hh - 50 - pad;
-				int armorH = 12 + pad*2;
-				appendRect(armorX, armorY, armorW, armorH, MAT_DOCK);
-			}
-		}
-		// Right group: food / hunger + air — две отдельные маски, каждая по форме ряда (§12)
-		if (!isCreative && canHurt) {
-			int foodX = hw + 10 - pad;
-			int foodY = hh - 39 - pad;
-			int foodW = 86 + pad * 2;
-			int foodH = 12 + pad * 2;
-			appendRect(foodX, foodY, foodW, foodH, MAT_DOCK);
-			if (p.getAirSupply() < p.getMaxAirSupply()) {
-				int airX = hw + 10 - pad;
-				int airY = hh - 50 - pad;
-				int airW = 86 + pad * 2;
-				int airH = 12 + pad * 2;
-				appendRect(airX, airY, airW, airH, MAT_DOCK);
-			}
-		}
-		// Center XP bar — виден только при наличии опыта и не в creative/spectator без XP
-		if (!isSpectator && (p.totalExperience > 0 || p.experienceLevel > 0 || p.experienceProgress > 0)) {
-			int xpX = hw - 91 - pad;
-			int xpY = hh - 29 - pad;
-			appendRect(xpX, xpY, 182 + pad*2, 6 + pad*2, MAT_DOCK);
+		var mc2 = Minecraft.getInstance();
+		var p2 = mc2.player;
+		if (p2 == null) return;
+		boolean xpShow = !p2.isCreative() && !p2.isSpectator() && xpGlass
+			&& (p2.totalExperience > 0 || p2.experienceLevel > 0 || p2.experienceProgress > 0);
+		if (xpShow) {
+			appendRect(hw - 92, hh - 30, 184, 6, MAT_DOCK);
 		}
 	}
 
 	private static boolean luminanceDockEnabled = true;
-	private static float dockPadding = 3f, dockOuterPad = 6f, dockCornerRadius = 6f, dockRefraction = 0.04f, dockDensity = 0.18f;
+	private static float dockPadding = 5f, dockOuterPad = 8f, dockCornerRadius = 9f, dockRefraction = 0.06f, dockDensity = 0.22f;
 	private static float lightDirX = 0f, lightDirY = 1f, lightIntensity = 1f;
+	private static float lightDirVelX = 0f, lightDirVelY = 0f, lightIntensityVel = 0f, lightConfidence = 1f;
+	// world-space smoothed light (for spring, before screen projection)
+	private static float worldLightX = 0f, worldLightY = 1f, worldLightZ = 0f;
+	private static float filteredWx = 0f, filteredWy = 1f, filteredWz = 0f;
+	private static float worldVelX = 0f, worldVelY = 0f, worldVelZ = 0f;
+	// WOW sun colour (linear-ish 0..1), exponentially smoothed like darkSmooth.
+	// Noon white / sunset orange / torch warm / Nether red / End violet.
+	private static float sunR = 1f, sunG = 0.98f, sunB = 0.94f;
+	private static long sunNanos = 0L;
 
 	private static float mainW() {
 		Minecraft mc = Minecraft.getInstance();
@@ -817,12 +1362,24 @@ public class LiquidGlassRenderer {
 	}
 
 	private static void appendRect(int x, int y, int w, int h, int mat) {
+		appendRect(x, y, w, h, mat, 0f, 0f);
+	}
+	private static void appendRect(int x, int y, int w, int h, int mat, float elev) {
+		appendRect(x, y, w, h, mat, elev, 0f);
+	}
+	private static void appendRect(int x, int y, int w, int h, int mat, float elev, float group) {
+		appendRect(x, y, w, h, mat, elev, group, 0f);
+	}
+	private static void appendRect(int x, int y, int w, int h, int mat, float elev, float group, float shapeW) {
 		if (pendingCount >= MAX_PANELS || w <= 0 || h <= 0) return;
 		pendX[pendingCount] = x;
 		pendY[pendingCount] = y;
 		pendW[pendingCount] = w;
 		pendH[pendingCount] = h;
 		pendMat[pendingCount] = mat;
+		pendElev[pendingCount] = elev;
+		pendGrp[pendingCount] = group;
+		pendShapeW[pendingCount] = shapeW;
 		pendingCount++;
 	}
 	private static int debugCount = 0;
@@ -835,9 +1392,69 @@ public class LiquidGlassRenderer {
 	private static final int[] pendW = new int[MAX_PANELS];
 	private static final int[] pendH = new int[MAX_PANELS];
 	private static final int[] pendMat = new int[MAX_PANELS];
+	private static final float[] pendElev = new float[MAX_PANELS];
+	private static final float[] pendGrp = new float[MAX_PANELS];
+	private static final float[] pendShapeW = new float[MAX_PANELS];
 	private static int pendingCount = 0;
 	private static int pendingGuiW = 1;
 	private static int pendingGuiH = 1;
+	// Button elevation: previous frame CONTROL/ACTIVE tiles, replay clips HUD items under them
+	// Wells and slots never stored, items belong inside them
+	private static final int ELEV_MAX = 64;
+	private static final int[] elevX = new int[ELEV_MAX];
+	private static final int[] elevY = new int[ELEV_MAX];
+	private static final int[] elevW = new int[ELEV_MAX];
+	private static final int[] elevH = new int[ELEV_MAX];
+	private static int elevCount = 0;
+	private static String elevScreen = "";
+
+	/** Snapshot button tiles once the full frame's batch is known (draw time). */
+	private static void snapshotElevTiles(Minecraft mc) {
+		elevCount = 0;
+		String cls = "";
+		try {
+			var s = mc.gui.screen();
+			if (s != null) cls = s.getClass().getName();
+		} catch (Exception ignored) {}
+		elevScreen = cls;
+		if (cls.isEmpty()) return;
+		for (int i = 0; i < pendingCount && elevCount < ELEV_MAX; i++) {
+			int m = pendMat[i];
+			if (m != MAT_CONTROL && m != MAT_ACTIVE) continue;
+			if (pendW[i] <= 0 || pendH[i] <= 0) continue;
+			elevX[elevCount] = pendX[i];
+			elevY[elevCount] = pendY[i];
+			elevW[elevCount] = pendW[i];
+			elevH[elevCount] = pendH[i];
+			elevCount++;
+		}
+	}
+
+	// Fail-open on screen change, stale tiles never erase items
+	public static boolean isUnderElevatedTile(int x, int y, int w, int h) {
+		if (!enabled) return false;
+		if (elevCount == 0 || w <= 0 || h <= 0) return false;
+		String cls = "";
+		try {
+			var s = Minecraft.getInstance().gui.screen();
+			if (s != null) cls = s.getClass().getName();
+		} catch (Exception ignored) {}
+		if (!elevScreen.equals(cls)) return false;
+		for (int i = 0; i < elevCount; i++) {
+			int x0 = elevX[i] + 2, y0 = elevY[i] + 2;
+			int x1 = elevX[i] + elevW[i] - 2, y1 = elevY[i] + elevH[i] - 2;
+			if (x1 <= x0 || y1 <= y0) continue;
+			if (x < x1 && x + w > x0 && y < y1 && y + h > y0) return true;
+		}
+		return false;
+	}
+	// Options sheets keep HUD items visible, Done stays above via strata order
+	public static boolean clipHudUnderButtons() {
+		var s = Minecraft.getInstance().gui.screen();
+		if (s instanceof net.minecraft.client.gui.screens.options.OptionsScreen) return false;
+		if (s instanceof net.minecraft.client.gui.screens.options.OptionsSubScreen) return false;
+		return true;
+	}
 	/** Index of the first HUD-submitted tile this frame; animation skips HUD tiles. */
 	private static int hudTilesFrom = -1;
 	/** Index of the first container-SLOT tile this frame — parallax range marker. */
@@ -860,7 +1477,15 @@ public class LiquidGlassRenderer {
 
 	private static void updateParallaxMouse() {
 		Minecraft mc = Minecraft.getInstance();
-		double mx = mc.mouseHandler.xpos(), my = mc.mouseHandler.ypos();
+		// FB px — window->fb чтобы parallax и shader были в одной СК, иначе сдвиг влево (§C).
+		// Отдельно X/Y — DPI может быть не квадратным, берём mainW/winW и mainH/winH.
+		var main = mc.gameRenderer != null ? mc.gameRenderer.mainRenderTarget() : null;
+		float fbW = main != null ? main.width : mainW();
+		float fbH = main != null ? main.height : fbW * 9f/16f;
+		float winW = Math.max(1f, (float) mc.getWindow().getWidth());
+		float winH = Math.max(1f, (float) mc.getWindow().getHeight());
+		double mx = mc.mouseHandler.xpos() * fbW / winW;
+		double my = mc.mouseHandler.ypos() * fbH / winH;
 		long now = System.nanoTime();
 		if (parX < 0 || parNanos == 0L) {
 			parX = (float) mx;
@@ -876,13 +1501,15 @@ public class LiquidGlassRenderer {
 
 	/**
 	 * Parallax shift (gui px) for an item at absolute gui coords: the icon
-	 * drifts TOWARD the smoothed mouse. Near-only: radius ~60 gui px around
-	 * the cursor, amplitude ≤1.2 gui px (sub-pixel steps stay invisible).
+	 * drifts TOWARD the smoothed mouse. Tight falloff: full pull under the
+	 * cursor, faint at one slot away, still past two slots.
 	 * Returns null when the item is outside our SLOT tiles (tabs and other
 	 * decorations stay static) or parallax is off.
 	 */
 	public static float[] itemParallax(int x, int y) {
 		if (parallaxStrength <= 0) return null;
+		// Lab master switch
+		if (!LiquidumDebugState.parallax) return null;
 		boolean haveTiles = slotTilesFrom >= 0 && slotTilesFrom < pendingCount;
 		if (!haveTiles && wellCellCount == 0) return null;
 		updateParallaxMouse();
@@ -932,11 +1559,11 @@ public class LiquidGlassRenderer {
 		float ix = (x + 8) * scale, iy = (y + 8) * scale;
 		float dx = parX - ix, dy = parY - iy;
 		float dist = (float) Math.sqrt(dx * dx + dy * dy);
-		float radius = 60.0f * scale;                       // near-only: ~60 gui px
+		float radius = 40.0f * scale;
 		float t = Math.max(0f, Math.min(1f, dist / radius));
-		float fall = 1f - t * t * (3f - 2f * t);
+		float fall = (1f - t) * (1f - t) * (1f - t);
 		if (fall <= 0.02f) return null;
-		float amt = 1.2f * fall * parallaxStrength;         // constant amplitude, near-only
+		float amt = 1.5f * fall * parallaxStrength;
 		float inv = 1f / Math.max(dist, 1e-3f);
 		return new float[] { dx * inv * amt / scale, dy * inv * amt / scale };
 	}
@@ -951,7 +1578,9 @@ public class LiquidGlassRenderer {
 		pendingGuiW = Math.max(1, guiW);
 		pendingGuiH = Math.max(1, guiH);
 		for (int[] r : rects) {
-			appendRect(r[0], r[1], r[2], r[3], MAT_CONTROL);
+			int mat = r.length >= 5 ? r[4] : MAT_CONTROL;
+			float grp = r.length >= 6 ? (float) r[5] : 0f;
+			appendRect(r[0], r[1], r[2], r[3], mat, 0f, grp);
 		}
 	}
 
@@ -967,18 +1596,29 @@ public class LiquidGlassRenderer {
 		// geometry (recipe book open/close shifts the panel). Coordinates are
 		// kept: captureTabFrame (fires on click, between frames) reads them.
 		hudPanelArea = 0;
+		bookX0 = 0; bookY0 = 0; bookX1 = -1; bookY1 = -1;
 		blurMarkerSeen = false;
 		pendingEntityDraw = null;
 		pendingBookDraw = null;
 		pendingBannerDraw = null;
 		deferredSprites.clear();
+		deferredBlits.clear();
+		deferredTabIcons.clear();
+		deferredTexts.clear();
+		deferredHudItems.clear();
+		deferredHudDecor.clear();
+		iconKeyCount = 0;
+		deferredBlits9.clear();
+		deferredSeqTexts.clear();
+		pendingMapDraw = null;
 		wellCount = 0;
 		wellCellCount = 0;
 		fxLit = -1f;
 		fxCook = -1f;
 		// §15 state leakage: при выходе из мира / hide HUD сбрасываем HUD-кольцо и dock
-		if (!shouldRenderHud()) {
+		if (!shouldRenderHotbarEdge() && !shouldRenderHud()) {
 			hudSelX = -1f; hudSelTargetX = -1f; hudSelNanos = 0L; hudSelCenterYGui = -1;
+			hotbarCollapse = 0f; hotbarCollapseNanos = 0L; selRingX = -1f; selRingNanos = 0L;
 		}
 	}
 
@@ -1088,7 +1728,33 @@ public class LiquidGlassRenderer {
 			hookGlassUniform(chain);
 			writePanelUniform(mc, main);
 
-			chain.process(main, GraphicsResourceAllocator.UNPOOLED);
+			// S.8 scissor: restrict glass work to union of uPanel + uRects (panels/tiles) — SDF stays full-res,
+			// downsampled blur still covers the union, final composite is cropped. Saves fillrate.
+			int[] scissor = computeScissorUnion(main);
+			boolean scissorOn = false;
+			if (scissor != null) {
+				try {
+					GlStateManager._enableScissorTest();
+					GlStateManager._scissorBox(scissor[0], scissor[1], scissor[2], scissor[3]);
+					scissorOn = true;
+					if (DEBUG && debugCount % 600 == 0) {
+						LiquidumMod.LOGGER.info("[glass] scissor {} {} {} {} (pend={} panel={}x{} wells={})",
+							scissor[0], scissor[1], scissor[2], scissor[3], pendingCount, (int)hudPanelW, (int)hudPanelH, wellCount);
+					}
+				} catch (Throwable t) {
+					LiquidumMod.LOGGER.warn("[glass] scissor enable failed: {}", t.toString());
+				}
+			}
+			try {
+				long passStart = System.nanoTime();
+				chain.process(main, GraphicsResourceAllocator.UNPOOLED);
+				float passMs = (System.nanoTime() - passStart) / 1_000_000f;
+				passMsSmooth = passMsSmooth <= 0f ? passMs : passMsSmooth + (passMs - passMsSmooth) * 0.1f;
+			} finally {
+				if (scissorOn) {
+					try { GlStateManager._disableScissorTest(); } catch (Throwable ignored) {}
+				}
+			}
 			consecutiveErrors = 0;
 			logFrame(LiquidumDebugState.mode, pendingCount, true, "ran");
 
@@ -1113,6 +1779,7 @@ public class LiquidGlassRenderer {
 
 	private static int consecutiveErrors = 0;
 	private static int resolveFailures = 0;
+	private static float passMsSmooth;
 	private static int lastLoggedCount = -1;
 	private static int diagCount = 0;
 	private static boolean lastRan = false;
@@ -1127,8 +1794,8 @@ public class LiquidGlassRenderer {
 		boolean slow = diagCount % 600 == 0;
 		boolean transition = pend != lastPend || ran != lastRan || !note.equals(lastNote);
 		if (transition && diagCount > 20 && diagCount - lastTransitionFrame > 15) {
-			LiquidumMod.LOGGER.info("[glass] TRANSITION @frame#{}: {} -> mode={}({}) pend={} ran={} {}",
-				diagCount, lastSummary, mode, LiquidumDebugState.modeName(), pend, ran, note);
+			LiquidumMod.LOGGER.info("[glass] TRANSITION @frame#{}: {} -> mode={}({}) pend={} ran={} {} frost={}",
+				diagCount, lastSummary, mode, LiquidumDebugState.modeName(), pend, ran, note, LiquidumDebugState.frostRadius);
 			lastTransitionFrame = diagCount;
 		}
 		if (burst || slow || (transition && Math.abs(diagCount - lastTransitionLog) > 30)) {
@@ -1182,6 +1849,8 @@ public class LiquidGlassRenderer {
 
 	/** Write widget-derived panel rects (std140: vec4[N] + vec4 + int). */
 	private static void writePanelUniform(Minecraft mc, RenderTarget main) {
+		// Snapshot before early-outs, replay needs it every frame
+		snapshotElevTiles(mc);
 		if (glassConfigBuffer == null || glassConfigBuffer.isClosed()) {
 			LiquidumMod.LOGGER.warn("[glass] EFFECT SKIP: uniform buffer missing/closed");
 			return;
@@ -1211,6 +1880,9 @@ public class LiquidGlassRenderer {
 			float cy = h - (pendY[i] + pendH[i] * 0.5f) * scale + r;
 			setRect(floats, i, cx, cy, hw, hh);
 			mats[i * 4] = pendMat[i];
+			mats[i * 4 + 1] = pendElev[i];
+			mats[i * 4 + 2] = pendGrp[i];
+			mats[i * 4 + 3] = pendShapeW[i];
 		}
 		int count = pendingCount;
 
@@ -1227,7 +1899,9 @@ public class LiquidGlassRenderer {
 			int matsOff = MAX_PANELS * 16;
 			for (int i = 0; i < MAX_PANELS; i++) {
 				bb.putFloat(matsOff + i * 16, mats[i * 4]);
-				// y/z/w stay zero (std140 padding).
+				bb.putFloat(matsOff + i * 16 + 4, mats[i * 4 + 1]);
+				bb.putFloat(matsOff + i * 16 + 8, mats[i * 4 + 2]);
+				bb.putFloat(matsOff + i * 16 + 12, mats[i * 4 + 3]);
 			}
 			int floatBytes = MAX_PANELS * 32 + MAX_WELLS * 3 * 16;   // tail after uWells
 			// uWells: 12 grid-дескрипторов × 3 vec4, конвертация gui → fb px
@@ -1240,8 +1914,8 @@ public class LiquidGlassRenderer {
 				float orgY = h - (wells[s + 1] + wells[s + 3] * 0.5f) * scale;
 				bb.putFloat(wellsOff + wi * 48, orgX);
 				bb.putFloat(wellsOff + wi * 48 + 4, orgY);
-				bb.putFloat(wellsOff + wi * 48 + 8, cellW * 0.5f - 1.0f * scale); // inner half
-				bb.putFloat(wellsOff + wi * 48 + 12, cellH * 0.5f - 1.0f * scale);
+			bb.putFloat(wellsOff + wi * 48 + 8, cellW * 0.5f - 0.5f * scale); // inner half
+			bb.putFloat(wellsOff + wi * 48 + 12, cellH * 0.5f - 0.5f * scale);
 				bb.putFloat(wellsOff + wi * 48 + 16, wells[s + 4] * scale);       // pitchX
 				bb.putFloat(wellsOff + wi * 48 + 20, wells[s + 5] * scale);       // pitchY
 				bb.putFloat(wellsOff + wi * 48 + 24, wells[s + 6]);               // cols
@@ -1303,13 +1977,22 @@ public class LiquidGlassRenderer {
 			} else {
 				bb.putFloat(panelOff + 8, 0.0f);
 			}
-			// uPar = parallax: smoothed mouse (fb px) + strength (fb px).
-			updateParallaxMouse();
-			int parOff = floatBytes + 112;
-			bb.putFloat(parOff, parX);
-			bb.putFloat(parOff + 4, parY);
-			bb.putFloat(parOff + 8, 1.0f * scale * parallaxStrength);
-			bb.putFloat(parOff + 12, 0.0f);
+		// uPar = parallax: smoothed mouse (fb px, bottom-origin) + strength.
+		updateParallaxMouse();
+		int parOff = floatBytes + 112;
+		bb.putFloat(parOff, parX);
+		bb.putFloat(parOff + 4, h - parY);
+			bb.putFloat(parOff + 8, LiquidumDebugState.parallax ? 0.35f * scale * parallaxStrength : 0f);
+			            // time for walk — static in dark/main-menu/pause, smooth fractional (no float jitter at 100+ fps)
+            float timeVal = 0f;
+            boolean isPause = false;
+            try { isPause = mc.isPaused(); } catch (Exception e) { isPause = mc.gui.screen() instanceof net.minecraft.client.gui.screens.PauseScreen; }
+            if (mc.level != null && !isPause && lightConfidence > 0.55f && lightIntensity > 0.35f) {
+                timeVal = (float)((System.nanoTime() % 100_000_000_000L) / 1_000_000_000.0);
+            } else {
+                timeVal = lightDirX * 3.0f; // static angle from light dir, no drift
+            }
+            bb.putFloat(parOff + 12, timeVal);
 			// uAnim = tab transition (active, progress 0..1).
 			int animOff = floatBytes + 128;
 			if (tabAnimActive) {
@@ -1321,13 +2004,14 @@ public class LiquidGlassRenderer {
 				bb.putFloat(animOff, 0f);
 				bb.putFloat(animOff + 4, 0f);
 			}
-			bb.putFloat(animOff + 8, 0f);
-			bb.putFloat(animOff + 12, 0f);
-			// uWellMeta = (wellCount, cookFill, tintStrength, 0).
-			int wellMetaOff = floatBytes + 144;
-			bb.putFloat(wellMetaOff, wellCount);
-			bb.putFloat(wellMetaOff + 4, fxCook >= 0 ? fxCook : 0f);
-			bb.putFloat(wellMetaOff + 8, tintStrength);
+		bb.putFloat(animOff + 8, com.liquidum.client.debug.LiquidumDebugState.domeHeight);
+		bb.putFloat(animOff + 12, 0f);
+		// uWellMeta = (wellCount, cookFill, tintStrength, sunSpec).
+		int wellMetaOff = floatBytes + 144;
+		bb.putFloat(wellMetaOff, wellCount);
+		bb.putFloat(wellMetaOff + 4, fxCook >= 0 ? fxCook : 0f);
+		bb.putFloat(wellMetaOff + 8, tintStrength);
+		bb.putFloat(wellMetaOff + 12, com.liquidum.client.debug.LiquidumDebugState.sunSpec);
 			// uFxFlame = (x, y, litIntensity, radius) — fb px / 0..1.
 			int fxFlameOff = floatBytes + 160;
 			if (fxLit >= 0) {
@@ -1364,22 +2048,34 @@ public class LiquidGlassRenderer {
 			bb.putFloat(dockOff + 4, dockCornerRadius * scale);
 			bb.putFloat(dockOff + 8, dockRefraction);
 			bb.putFloat(dockOff + 12, dockDensity);
-			int lightOff = floatBytes + 224;
-			bb.putFloat(lightOff, lightDirX);
-			bb.putFloat(lightOff + 4, lightDirY);
-			bb.putFloat(lightOff + 8, lightIntensity);
-			bb.putFloat(lightOff + 12, 0f);
+		int lightOff = floatBytes + 224;
+		bb.putFloat(lightOff, lightDirX);
+		bb.putFloat(lightOff + 4, lightDirY);
+		bb.putFloat(lightOff + 8, lightIntensity);
+		bb.putFloat(lightOff + 12, lightConfidence);
+		// uSun = WOW sun colour (smoothed) + spec master from the Lab.
+		int sunOff = floatBytes + 240;
+		bb.putFloat(sunOff, sunR);
+		bb.putFloat(sunOff + 4, sunG);
+		bb.putFloat(sunOff + 8, sunB);
+		bb.putFloat(sunOff + 12, com.liquidum.client.debug.LiquidumDebugState.sunSpec);
+		// uBleed = (bodyBleed, edgeBleed, chroma, 0).
+		int bleedOff = floatBytes + 256;
+		bb.putFloat(bleedOff, LiquidumDebugState.bodyBleed);
+		bb.putFloat(bleedOff + 4, LiquidumDebugState.edgeBleed);
+		bb.putFloat(bleedOff + 8, LiquidumDebugState.chroma);
+		bb.putFloat(bleedOff + 12, 0f);
 			int screenOff = floatBytes + 32; // after count's 16-byte slot
 			bb.putFloat(screenOff, w);
 			bb.putFloat(screenOff + 4, h);
-			// zw = mouse position in main-pixel space, bottom-origin (hover FX).
-			double mx = mc.mouseHandler.xpos();
-			double my = mc.mouseHandler.ypos();
+			// zw = mouse in main framebuffer px, bottom-origin (hover FX) — window→fb scale!
+			double mx = mc.mouseHandler.xpos() * w / mc.getWindow().getWidth();
+			double my = mc.mouseHandler.ypos() * h / mc.getWindow().getHeight();
 			bb.putFloat(screenOff + 8, (float) mx);
 			bb.putFloat(screenOff + 12, (float) (h - my));
 			// flags = (mode, hover, edgeFX, frostRadius); edgeFX: +2 aberration, +1 rim
 			int flagsOff = screenOff + 16;
-			bb.putFloat(flagsOff, LiquidumDebugState.mode);
+			bb.putFloat(flagsOff, soloMode(LiquidumDebugState.mode));
 			bb.putFloat(flagsOff + 4, LiquidumDebugState.hover ? 1f : 0f);
 			bb.putFloat(flagsOff + 8, (LiquidumDebugState.aberration ? 2f : 0f) + (LiquidumDebugState.rim ? 1f : 0f));
 			bb.putFloat(flagsOff + 12, LiquidumDebugState.frost ? LiquidumDebugState.frostRadius : 0f);
@@ -1415,9 +2111,44 @@ public class LiquidGlassRenderer {
 
 	private static long lastTime = System.nanoTime();
 
+	/** One-line pipeline state for the Lab status readout, no side effects. */
+	// Solo stage overrides the debug mode for isolated layer checks
+	private static int soloMode(int base) {
+		return switch (LiquidumDebugState.soloStage) {
+			case 1 -> 0;
+			case 2 -> 1;
+			case 3 -> 7;
+			case 4 -> 8;
+			case 5 -> 9;
+			case 6 -> 10;
+			case 7 -> 11;
+			case 8 -> 12;
+			case 9 -> 13;
+			case 10 -> 14;
+			case 11 -> 15;
+			default -> base;
+		};
+	}
+	public static String labStatus() {
+		if (!enabled) {
+			return "выключено";
+		}
+		if (errored) {
+			return "ошибка цепочки";
+		}
+		if (!initialized) {
+			return "загрузка";
+		}
+		if (lastRan) {
+			return passMsSmooth > 0f
+				? String.format(java.util.Locale.ROOT, "работает · %.1f мс", passMsSmooth)
+				: "работает";
+		}
+		return lastNote.isEmpty() ? "ожидание" : lastNote;
+	}
+
 	/** Full subsystem dump for the Lab (called from the debug screen). */
-	public static void dumpDiagnostics() {
-		Minecraft mc = Minecraft.getInstance();
+	public static void dumpDiagnostics() {		Minecraft mc = Minecraft.getInstance();
 		var sm = mc.getShaderManager();
 		PostChain chain = loadedChain;
 		LiquidumMod.LOGGER.info("[lab] === DIAGNOSTICS ===");
@@ -1431,9 +2162,24 @@ public class LiquidGlassRenderer {
 			var t = ((com.liquidum.client.mixin.PostChainAccessor) chain).liquidum$getPersistentTargets()
 				.get(net.minecraft.resources.Identifier.parse("minecraft:glassout"));
 			if (t != null) LiquidumMod.LOGGER.info("[lab] glassout={}x{} viewCached={}", t.width, t.height, glassOutView != null);
+			// List every persistent target to prove blur mip levels exist
+			for (var e : ((com.liquidum.client.mixin.PostChainAccessor) chain).liquidum$getPersistentTargets().entrySet()) {
+				var tg = e.getValue();
+				LiquidumMod.LOGGER.info("[lab] target {}={}x{}", e.getKey(), tg.width, tg.height);
+			}
 		}
 		LiquidumMod.LOGGER.info("[lab] glassConfigBuffer={} (closed={})",
 			glassConfigBuffer != null, glassConfigBuffer != null && glassConfigBuffer.isClosed());
+		LiquidumMod.LOGGER.info("[lab] tiles={} wells={} wellCells={} panel=[{},{},{}x{}] area={} tabAnim={}",
+			pendingCount, wellCount, wellCellCount,
+			Math.round(hudPanelX), Math.round(hudPanelY), Math.round(hudPanelW), Math.round(hudPanelH), hudPanelArea, tabAnimActive);
+		int shown = Math.min(pendingCount, 8);
+		for (int i = 0; i < shown; i++) {
+			LiquidumMod.LOGGER.info("[lab] tile#{}=[{},{},{}x{}] mat={} elev={} grp={} shapeW={}",
+				i, pendX[i], pendY[i], pendW[i], pendH[i], pendMat[i], pendElev[i], pendGrp[i], pendShapeW[i]);
+		}
+		LiquidumMod.LOGGER.info("[lab] light=({},{}) int={} conf={} dark={} passMs={}",
+			lightDirX, lightDirY, lightIntensity, lightConfidence, darkSmooth, passMsSmooth);
 		LiquidumMod.LOGGER.info("[lab] === END ===");
 	}
 
