@@ -42,10 +42,10 @@ public class ContainerMixin {
 
 	@Inject(method = "extractSlots", at = @At("HEAD"))
 	private void liquidum$submitSlotTiles(GuiGraphicsExtractor guiGraphics, int mouseX, int mouseY, CallbackInfo ci) {
+		com.liquidum.client.shader.LiquidumLayers.beginInventoryObjects(guiGraphics);
 		if (!LiquidGlassRenderer.replaceSlotTiles()) return;
-		// Panel: полная подстилка на всю высоту контейнера, как у Recipe Book
-		// (147x166, MAT_COMPANION). Раньше была только 86px под инвентарём игрока,
-		// верх оставался только wells — теперь весь фон, как у книги рецептов.
+		if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(net.minecraft.client.Minecraft.getInstance().gui.screen())) return;
+		// Стеклянная подстилка как у RecipeBook 147x166 — без серой вуали, squircle 15px
 		LiquidGlassRenderer.submitLightPanel(leftPos, topPos, imageWidth, imageHeight);
 		if (LiquidGlassRenderer.DEBUG && LiquidGlassRenderer.diagCount() % 120 == 0) {
 			com.liquidum.LiquidumMod.LOGGER.info("[glass] container pos: leftPos={} topPos={} imgW={} imgH={} slots={}", leftPos, topPos, imageWidth, imageHeight, menu.slots.size());
@@ -74,6 +74,7 @@ public class ContainerMixin {
 		java.util.Map<Integer, List<Integer>> rows = new java.util.HashMap<>();
 		for (int i = 0; i < n; i++) {
 			if (!slots.get(i).isActive()) continue;
+			if (slots.get(i).x < -1000 || slots.get(i).y < -1000) continue;
 			rows.computeIfAbsent(slots.get(i).y, k -> new java.util.ArrayList<>()).add(i);
 		}
 		List<Integer> ys = new java.util.ArrayList<>(rows.keySet());
@@ -149,9 +150,23 @@ public class ContainerMixin {
 			for (int j = 0; j < idxs.size(); j++) {
 				if (slots.get(idxs.get(j)) == hovered) { hover = j; break; }
 			}
-			LiquidGlassRenderer.submitGridWell(
-				leftPos + (Integer) blk[0] - 1, topPos + (Integer) blk[1] - 1,
-				18, 18, 18, 18, (Integer) blk[2], (Integer) blk[3], hover);
+			int bx = (Integer) blk[0], by = (Integer) blk[1], bc = (Integer) blk[2], br = (Integer) blk[3];
+			if (by > 100 && bc == 9 && br == 1) {
+				// Hotbar row inside the screen: one 9x1 well, same look as grids.
+				// Wells center on item pixels (slot.x + 8)
+				if (!LiquidGlassRenderer.submitGridWell(
+					leftPos + bx - 1, topPos + by - 1,
+					18, 18, 18, 18, bc, br, hover)) {
+					for (int idx : idxs) {
+						Slot s = slots.get(idx);
+						LiquidGlassRenderer.submitSlotWell(leftPos + s.x - 1, topPos + s.y - 1);
+					}
+				}
+			} else {
+				LiquidGlassRenderer.submitGridWell(
+					leftPos + bx - 1, topPos + by - 1,
+					18, 18, 18, 18, bc, br, hover);
+			}
 		}
 		// Помечаем слоты, попавшие в wells (freeform не нужны).
 		boolean[] used = new boolean[n];
@@ -160,8 +175,15 @@ public class ContainerMixin {
 		}
 		for (int i = 0; i < n; i++) {
 			if (!slots.get(i).isActive() || used[i]) continue;
-			LiquidGlassRenderer.submitSlotWell(
-				leftPos + slots.get(i).x - 1, topPos + slots.get(i).y - 1);
+			if (slots.get(i).x < -1000 || slots.get(i).y < -1000) continue;
+			// Lone slots (offhand, boots, craft result): same concave well as grids.
+			int hov = slots.get(i) == hovered ? 0 : -1;
+			if (!LiquidGlassRenderer.submitGridWell(
+				leftPos + slots.get(i).x - 1, topPos + slots.get(i).y - 1,
+				18, 18, 18, 18, 1, 1, hov)) {
+				LiquidGlassRenderer.submitSlotWell(
+					leftPos + slots.get(i).x - 1, topPos + slots.get(i).y - 1);
+			}
 		}
 
 		// ── Semantic adapter: Furnace (реальные имена 26.x Mojmap) ──
@@ -191,8 +213,8 @@ public class ContainerMixin {
 		// red crosses for the geometry debug overlay.
 		int hcx = -1, hcy = -1, scx = -1, scy = -1;
 		if (hovered != null) {
-			hcx = leftPos + hovered.x + 9;
-			hcy = topPos + hovered.y + 9;
+			hcx = leftPos + hovered.x + 8;
+			hcy = topPos + hovered.y + 8;
 			// The "selected" highlight in containers tracks the hovered slot
 			// (the slot under the cursor / being interacted with).
 			scx = hcx; scy = hcy;
@@ -202,8 +224,8 @@ public class ContainerMixin {
 		int[] centres = new int[slots.size() * 2];
 		for (int i = 0; i < slots.size(); i++) {
 			Slot s = slots.get(i);
-			centres[i * 2] = leftPos + s.x + 9;
-			centres[i * 2 + 1] = topPos + s.y + 9;
+			centres[i * 2] = leftPos + s.x + 8;
+			centres[i * 2 + 1] = topPos + s.y + 8;
 		}
 		LiquidGlassRenderer.setDebugSlotCentres(centres);
 	}
@@ -238,9 +260,7 @@ public class ContainerMixin {
 		net.minecraft.client.gui.GuiGraphicsExtractor instance,
 		net.minecraft.world.item.ItemStack stack, int x, int y, int seed,
 		Operation<Void> original) {
-		// Tab Stack: items DON'T move — the captured old frame slides away
-		// above them (shader side). Only the cursor parallax applies here.
-		// Smooth scroll: items still glide with the spring.
+		com.liquidum.client.shader.LiquidumLayers.beginItems(instance);
 		int fy = y;
 		float[] off = LiquidGlassRenderer.itemParallax(leftPos + x, topPos + y);
 		if (off == null) {
@@ -254,6 +274,63 @@ public class ContainerMixin {
 		original.call(instance, stack,
 			x + Math.round(off[0]),
 			fy + Math.round(off[1]), seed);
+	}
+
+	/**
+	 * Keep count labels glued to their icons: the same parallax offset
+	 * applied to item() must move itemDecorations(), or numbers detach.
+	 */
+	@WrapOperation(
+		method = "extractSlot",
+		at = @At(
+			value = "INVOKE",
+			target = "Lnet/minecraft/client/gui/GuiGraphicsExtractor;itemDecorations(Lnet/minecraft/client/gui/Font;Lnet/minecraft/world/item/ItemStack;IILjava/lang/String;)V"
+		)
+	)
+	private void liquidum$itemDecorationsParallax(
+		net.minecraft.client.gui.GuiGraphicsExtractor instance,
+		net.minecraft.client.gui.Font font, net.minecraft.world.item.ItemStack stack,
+		int x, int y, String text,
+		Operation<Void> original) {
+		com.liquidum.client.shader.LiquidumLayers.beginText(instance);
+		float[] off = LiquidGlassRenderer.itemParallax(leftPos + x, topPos + y);
+		if (off == null) {
+			original.call(instance, font, stack, x, y, text);
+			return;
+		}
+		original.call(instance, font, stack,
+			x + Math.round(off[0]),
+			y + Math.round(off[1]), text);
+	}
+
+	@Inject(method = "extractLabels", at = @At("HEAD"))
+	private void liquidum$labelsAboveInventory(GuiGraphicsExtractor g, int mx, int my, CallbackInfo ci) {
+		com.liquidum.client.shader.LiquidumLayers.beginText(g);
+	}
+
+	@WrapOperation(
+		method = "extractSlot",
+		at = @At(
+			value = "INVOKE",
+			target = "Lnet/minecraft/client/gui/GuiGraphicsExtractor;fakeItem(Lnet/minecraft/world/item/ItemStack;III)V"
+		)
+	)
+	private void liquidum$fakeItemLayer(
+		GuiGraphicsExtractor instance,
+		net.minecraft.world.item.ItemStack stack, int x, int y, int seed,
+		Operation<Void> original) {
+		com.liquidum.client.shader.LiquidumLayers.beginItems(instance);
+		original.call(instance, stack, x, y, seed);
+	}
+
+	@Inject(method = "extractCarriedItem", at = @At("HEAD"))
+	private void liquidum$carriedOnTop(GuiGraphicsExtractor g, int mx, int my, CallbackInfo ci) {
+		com.liquidum.client.shader.LiquidumLayers.beginCarried(g);
+	}
+
+	@Inject(method = "extractTooltip", at = @At("HEAD"))
+	private void liquidum$tooltipOnTop(GuiGraphicsExtractor g, int mx, int my, CallbackInfo ci) {
+		com.liquidum.client.shader.LiquidumLayers.beginTooltip(g);
 	}
 
 	/**

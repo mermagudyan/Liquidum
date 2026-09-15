@@ -30,6 +30,8 @@ public class TextStyleMixin {
 	private void liquidum$applyTextStyle(Font font, FormattedCharSequence text, int x, int y, int color, boolean shadow, CallbackInfo ci) {
 		if (liquidum$inTextStyle) return;
 		if ((color & 0xFF000000) == 0) return;
+		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
+		if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(screen)) return;
 		LiquidumTextStyle style = LiquidumTypography.current();
 		if (!LiquidumTypography.needsCustomShadow(style)) return;
 		// В каждом блоке текст как в Recipe Book Search — один цвет/обводка
@@ -39,7 +41,6 @@ public class TextStyleMixin {
 		if (!needShadow) return;
 		// Унифицируем цвет меток контейнеров (Inventory/Crafting/Chest/Furnace) с Search
 		int textColor = color;
-		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
 		if (screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen) {
 			// Тёмный vanilla #404040 → светлый как у Search для читаемости на стекле
 			if ((color & 0x00FFFFFF) == 0x00404040 || color == 4210752) {

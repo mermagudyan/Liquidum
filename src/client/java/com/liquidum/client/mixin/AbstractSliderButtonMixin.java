@@ -33,6 +33,11 @@ public class AbstractSliderButtonMixin {
 			original.call(instance, pipeline, sprite, x, y, width, height, color);
 			return;
 		}
+		// Opted-out screens keep the vanilla track sprite as drawn
+		if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(net.minecraft.client.Minecraft.getInstance().gui.screen())) {
+			original.call(instance, pipeline, sprite, x, y, width, height, color);
+			return;
+		}
 		// no-op: glass tile replaces the track
 	}
 }

@@ -63,4 +63,15 @@ public class ForegroundDeferralMixin {
 		LiquidGlassRenderer.captureBanner(model, dye, patterns, x, y, w, h);
 		ci.cancel();
 	}
+
+	@Inject(
+		method = "map(Lnet/minecraft/client/renderer/state/MapRenderState;)V",
+		at = @At("HEAD"),
+		cancellable = true
+	)
+	private void liquidum$deferMap(net.minecraft.client.renderer.state.MapRenderState state, CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		LiquidGlassRenderer.captureMap(state);
+		ci.cancel();
+	}
 }

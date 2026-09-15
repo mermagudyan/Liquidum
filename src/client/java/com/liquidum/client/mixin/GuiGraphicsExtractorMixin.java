@@ -35,18 +35,16 @@ public class GuiGraphicsExtractorMixin {
 			// 2px inset: книга и инвентарь читаются как две РОДСТВЕННЫЕ панели
 			// с намеренным зазором, а не как две случайно наложившиеся
 			// поверхности (стык без скруглённого «вспухания»).
-			LiquidGlassRenderer.submitLightPanel(x + 2, y + 2, width - 4, height - 4);
+			LiquidGlassRenderer.submitBookPanel(x + 2, y + 2, width - 4, height - 4);
 			ci.cancel();
 			return;
 		}
-		// Большая панель теперь — полная подстилка на всю высоту контейнера
-		// через ContainerMixin (как у Recipe Book 147x166, MAT_COMPANION).
-		// Любую container/* панель гасим без uPanel. Порог по высоте 48, а не 100:
-		// ContainerScreen (сундук) рисует двумя блитами 176x71 (верх) + 176x96 (низ),
-		// оба <100 и просачивались серой текстурой. Shulker/Hopper/Furnace — одним
-		// блитом 176x133..167 и гасились корректно, поэтому серая панель была только в сундуках.
+		// Матовая подстилка удалена навсегда — ванильную панель 176x166/222
+		// просто гасим, без submitPanelRect (мир просвечивает, остаются только Well-колодцы 18x18).
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
+		if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(screen)) return;
 		if (screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen) {
+			if (!LiquidGlassRenderer.replaceSlotTiles()) return;
 			if (texture.getPath().startsWith("textures/gui/container/") && width > 100 && height > 48) {
 				ci.cancel();
 				return;
@@ -64,7 +62,6 @@ public class GuiGraphicsExtractorMixin {
 			}
 		}
 		if (!LiquidGlassRenderer.filterContainerPanel(texture)) return;
-		LiquidGlassRenderer.submitPanelRect(x, y, width, height);
 		ci.cancel();
 	}
 
@@ -84,7 +81,7 @@ public class GuiGraphicsExtractorMixin {
 	                                          float u, float v, int width, int height,
 	                                          int texW, int texH, CallbackInfo ci) {
 		if (texture.getPath().contains("recipe_book/overlay")) {
-			LiquidGlassRenderer.submitSpriteTile(x, y, width, height, LiquidGlassRenderer.MAT_ACTIVE);
+			LiquidGlassRenderer.submitSpriteTile(x, y, width, height, LiquidGlassRenderer.MAT_ACTIVE, 1.0f, 0.0f);
 			ci.cancel();
 		}
 	}
@@ -104,26 +101,57 @@ public class GuiGraphicsExtractorMixin {
 		// Большая матовая панель контейнера через blitSprite (container/background 176×166/222
 		// или generic_54 части) — убираем везде, остаётся полная подстилка
 		// из ContainerMixin (как у Recipe Book 147x166, на всю высоту imageHeight).
-		// Порог 48 для совместимости с двух-блитовым сундуком.
+		// Порог 48 для двух-блитового сундука; гейт — containerGlass.
 		String sp = sprite.getPath();
 		if (sp.startsWith("container/") && width > 100 && height > 48) {
 			var screen2 = net.minecraft.client.Minecraft.getInstance().gui.screen();
+			if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(screen2)) return;
 			if (screen2 instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen) {
+				if (!LiquidGlassRenderer.replaceSlotTiles()) return;
 				ci.cancel();
 				return;
 			}
 		}
+		// Матовая подстилка удалена — второй путь (blitSprite) тоже только гасим
 		// Progress icons furnace/grindstone/enchanting etc. — должны быть sharp foreground,
 		// Все маленькие container-спрайты прогрессов/стрелок/иконок кликабельных блоков
 		// (печь, точило, зачарование и т.д.) — должны быть sharp foreground, а не
 		// частью blurred panel (иначе огонь/стрелка ниже стекла). Деферим все
 		// container/* <40px, кроме slot_highlight (который отменяется Wall-ом).
+		// Vanilla square slot cell, our well replaces it
+		if (sp.equals("container/slot")) {
+			var screen3 = net.minecraft.client.Minecraft.getInstance().gui.screen();
+			if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(screen3)) return;
+			if (screen3 instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen
+				&& LiquidGlassRenderer.replaceSlotTiles()) {
+				ci.cancel();
+				return;
+			}
+		}
 		if (sp.startsWith("container/") && !sp.contains("slot_highlight") && width < 40 && height < 40) {
 			if (LiquidGlassRenderer.deferForeground()) {
 				LiquidGlassRenderer.deferBlitSprite(pipeline, sprite, x, y, width, height);
 				ci.cancel();
 				return;
 			}
+		}
+		// Rename field stays crisp above panel glass
+		if (sp.contains("text_field") && LiquidGlassRenderer.deferForeground()) {
+			LiquidGlassRenderer.deferBlitSprite(pipeline, sprite, x, y, width, height);
+			ci.cancel();
+			return;
+		}
+		// Map preview backing stays with the map above panel glass
+		if (sp.startsWith("container/cartography_table/") && LiquidGlassRenderer.deferForeground()) {
+			LiquidGlassRenderer.deferBlitSprite(pipeline, sprite, x, y, width, height);
+			ci.cancel();
+			return;
+		}
+		// Enchant clue rows keep their own glass body
+		if (sp.startsWith("container/enchanting_table/enchantment_slot")) {
+			LiquidGlassRenderer.submitSpriteTile(x, y, width, height, LiquidGlassRenderer.MAT_CONTROL, 1.0f, 2.0f + (y / 20));
+			ci.cancel();
+			return;
 		}
 		// Recipe Book button: icon-only (см. LiquidGlassRenderer.drawRecipeBookButton).
 		if (sp.startsWith("recipe_book/button")) {
@@ -132,33 +160,249 @@ public class GuiGraphicsExtractorMixin {
 				x, y, width, height, sprite.getPath().contains("highlighted"));
 			return;
 		}
+		if (sp.contains("recipe_book/overlay")) {
+			LiquidGlassRenderer.submitSpriteTile(x, y, width, height, LiquidGlassRenderer.MAT_ACTIVE, 1.0f, 0.0f);
+			ci.cancel();
+			return;
+		}
 		int mat = LiquidGlassRenderer.filterUiSprite(sprite);
 		if (mat < 0) {
 			if (!LiquidGlassRenderer.filterCreativeTab(sprite)) return;
 			mat = LiquidGlassRenderer.MAT_CONTROL;
 		}
-		LiquidGlassRenderer.submitSpriteTile(x, y, width, height, mat);
+		if (sp.startsWith("container/creative_inventory/tab_")) {
+			boolean sel = sp.contains("selected");
+			boolean isTop = sp.contains("_top_");
+			int useMat = sel ? LiquidGlassRenderer.MAT_COMPANION : LiquidGlassRenderer.MAT_CONTROL;
+			if (sel) {
+				if (isTop) LiquidGlassRenderer.submitSpriteTile(x, y, width, height + 4, useMat, 0.0f, 0.0f);
+				else LiquidGlassRenderer.submitSpriteTile(x, y - 4, width, height + 4, useMat, 0.0f, 0.0f);
+			} else {
+				LiquidGlassRenderer.submitSpriteTile(x, y, width, height, useMat, 0.0f, 0.0f);
+			}
+			ci.cancel();
+			return;
+		}
+		if (sp.startsWith("recipe_book/tab")) {
+			// Active tab becomes book surface (group 1), idle tabs fuse alone
+			boolean sel = sp.contains("selected");
+			if (sel) LiquidGlassRenderer.submitSpriteTile(x, y, width + LiquidGlassRenderer.tabBridge(x, y, width, height), height, LiquidGlassRenderer.MAT_COMPANION, 0.0f, 1.0f);
+			else LiquidGlassRenderer.submitSpriteTile(x, y, width, height, mat, 0.0f, 2.0f + (y / 20));
+		} else if (sp.startsWith("widget/text_field") || sp.startsWith("recipe_book/overlay")) {
+			// In-book controls match book height, fuse alone
+			LiquidGlassRenderer.submitSpriteTile(x, y, width, height, mat, 1.0f, 0.0f);
+		} else {
+			LiquidGlassRenderer.submitSpriteTile(x, y, width, height, mat);
+		}
 		ci.cancel();
+	}
+
+	/**
+	 * Other blit overloads (11/12-arg with color/depth tail): vanilla draws some
+	 * overlays through them — same treatment as the 10-arg hook.
+	 */
+	// Sliced progress icons share the sharp foreground path
+	@Inject(
+		method = "blitSprite(Lcom/mojang/blaze3d/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIIIIIII)V",
+		at = @At("HEAD"),
+		cancellable = true,
+		require = 0
+	)
+	private void liquidum$deferProgressNine(RenderPipeline pipeline, Identifier sprite,
+	                                        int u0, int v0, int sw, int sh,
+	                                        int x, int y, int w, int h, CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (LiquidGlassRenderer.isInForegroundReplay()) return;
+		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
+		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
+		String sp = sprite.getPath();
+		if (sp.contains("slot_highlight")) return;
+		if (w < 40 && h < 40 && sp.startsWith("container/")) {
+			LiquidGlassRenderer.deferBlitSprite9(pipeline, sprite, u0, v0, sw, sh, x, y, w, h);
+			ci.cancel();
+		}
+	}
+	@Inject(
+		method = "blit(Lcom/mojang/blaze3d/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIFFIIIII)V",
+		at = @At("HEAD"),
+		cancellable = true,
+		require = 0
+	)
+	private void liquidum$filterBlit11(RenderPipeline pipeline, Identifier texture, int x, int y,
+									  float u, float v, int width, int height,
+									  int texW, int texH, int extra, CallbackInfo ci) {
+		if (texture.getPath().contains("recipe_book/overlay")) {
+			LiquidGlassRenderer.submitSpriteTile(x, y, width, height, LiquidGlassRenderer.MAT_ACTIVE, 1.0f, 0.0f);
+			ci.cancel();
+		}
+	}
+
+	@Inject(
+		method = "blit(Lcom/mojang/blaze3d/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIFFIIIIII)V",
+		at = @At("HEAD"),
+		cancellable = true,
+		require = 0
+	)
+	private void liquidum$filterBlit12(RenderPipeline pipeline, Identifier texture, int x, int y,
+									  float u, float v, int width, int height,
+									  int texW, int texH, int extra1, int extra2, CallbackInfo ci) {
+		if (texture.getPath().contains("recipe_book/overlay")) {
+			LiquidGlassRenderer.submitSpriteTile(x, y, width, height, LiquidGlassRenderer.MAT_ACTIVE, 1.0f, 0.0f);
+			ci.cancel();
+		}
 	}
 
 	/** Tab icons (creative) — должны быть sharp foreground над tab glass.
 	 *  Vanila рисует их в той же фазе, что и tab background, но glass composite
 	 *  идёт между background и widget фазами — иконка должна быть после glass.
-	 *  Перехватываем item вызовы для вкладок и откладываем до replay. */
+	 *  Верхние табы около topPos-19, нижние около topPos+imageHeight+3. */
+	private boolean liquidum$isCreativeTabIcon(int x, int y) {
+		try {
+			var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
+			if (!(screen instanceof net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen cScreen)) return false;
+			var acc = (AbstractContainerScreenAccessor) screen;
+			int leftPos = acc.liquidum$getLeftPos();
+			int topPos = acc.liquidum$getTopPos();
+			int imageHeight = acc.liquidum$getImageHeight();
+			boolean inTop = y >= topPos - 32 && y <= topPos + 4;
+			boolean inBottom = y >= topPos + imageHeight - 12 && y <= topPos + imageHeight + 24;
+			if (!inTop && !inBottom) return false;
+			var menu = cScreen.getMenu();
+			for (var slot : menu.slots) {
+				if ((slot.x == x && slot.y == y) || (leftPos + slot.x == x && topPos + slot.y == y)) return false;
+			}
+			return true;
+		} catch (Exception ignored) {
+			return false;
+		}
+	}
 	@Inject(method = "item(Lnet/minecraft/world/item/ItemStack;III)V", at = @At("HEAD"), cancellable = true)
 	private void liquidum$deferTabIcon(net.minecraft.world.item.ItemStack stack, int x, int y, int seed, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
 		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (!liquidum$isCreativeTabIcon(x, y)) return;
+		LiquidGlassRenderer.deferTabIcon(stack, x, y, seed);
+		ci.cancel();
+	}
+	@Inject(method = "item(Lnet/minecraft/world/item/ItemStack;II)V", at = @At("HEAD"), cancellable = true)
+	private void liquidum$deferTabIconNoSeed(net.minecraft.world.item.ItemStack stack, int x, int y, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (!liquidum$isCreativeTabIcon(x, y)) return;
+		LiquidGlassRenderer.deferTabIcon(stack, x, y, 0);
+		ci.cancel();
+	}
+	@Inject(method = "fakeItem(Lnet/minecraft/world/item/ItemStack;III)V", at = @At("HEAD"), cancellable = true)
+	private void liquidum$deferTabFakeIconSeed(net.minecraft.world.item.ItemStack stack, int x, int y, int seed, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (!liquidum$isCreativeTabIcon(x, y)) return;
+		LiquidGlassRenderer.deferTabIcon(stack, x, y, seed);
+		ci.cancel();
+	}
+	@Inject(method = "fakeItem(Lnet/minecraft/world/item/ItemStack;II)V", at = @At("HEAD"), cancellable = true)
+	private void liquidum$deferTabFakeIcon(net.minecraft.world.item.ItemStack stack, int x, int y, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (!liquidum$isCreativeTabIcon(x, y)) return;
+		LiquidGlassRenderer.deferTabIcon(stack, x, y, 0);
+		ci.cancel();
+	}
+
+	// Display items baked in background land above glass instead
+	@Inject(method = "item(Lnet/minecraft/world/item/ItemStack;III)V", at = @At("HEAD"), cancellable = true)
+	private void liquidum$deferBackgroundItem(net.minecraft.world.item.ItemStack stack, int x, int y, int seed, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
-		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen)) return;
-		try {
-			var acc = (AbstractContainerScreenAccessor) screen;
-			int topPos = acc.liquidum$getTopPos();
-			// Tab bar is  -28..0 above panel (y < topPos)
-			if (y < topPos && y > topPos - 40) {
-				LiquidGlassRenderer.deferTabIcon(stack, x, y, seed);
-				ci.cancel();
-			}
-		} catch (Exception ignored) {}
+		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
+		LiquidGlassRenderer.deferTabIcon(stack, x, y, seed);
+		ci.cancel();
+	}
+	@Inject(method = "item(Lnet/minecraft/world/item/ItemStack;II)V", at = @At("HEAD"), cancellable = true)
+	private void liquidum$deferBackgroundItemNoSeed(net.minecraft.world.item.ItemStack stack, int x, int y, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isInForegroundReplay()) return;
+		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
+		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
+		LiquidGlassRenderer.deferTabIcon(stack, x, y, 0);
+		ci.cancel();
+	}
+	@Inject(method = "fakeItem(Lnet/minecraft/world/item/ItemStack;III)V", at = @At("HEAD"), cancellable = true)
+	private void liquidum$deferBackgroundFakeSeed(net.minecraft.world.item.ItemStack stack, int x, int y, int seed, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isInForegroundReplay()) return;
+		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
+		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
+		LiquidGlassRenderer.deferTabIcon(stack, x, y, seed);
+		ci.cancel();
+	}
+	@Inject(method = "fakeItem(Lnet/minecraft/world/item/ItemStack;II)V", at = @At("HEAD"), cancellable = true)
+	private void liquidum$deferBackgroundFake(net.minecraft.world.item.ItemStack stack, int x, int y, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isInForegroundReplay()) return;
+		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
+		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
+		LiquidGlassRenderer.deferTabIcon(stack, x, y, 0);
+		ci.cancel();
+	}
+
+	/** P2: Anvil cost / Enchant clues — рисуются в extractBackground (до blur) → размывались.
+	 *  Откладываем text из background-фазы в foreground (после стекла), как entity/book. */	@Inject(method = "text(Lnet/minecraft/client/gui/Font;Lnet/minecraft/network/chat/Component;IIIZ)V", at = @At("HEAD"), cancellable = true)
+	private void liquidum$deferBackgroundText(net.minecraft.client.gui.Font font, net.minecraft.network.chat.Component text, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSeen()) return; // уже после blur — sharp и так
+		if (LiquidGlassRenderer.isInForegroundReplay()) return;
+		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
+		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
+		LiquidGlassRenderer.deferText(font, text, x, y, color, shadow);
+		ci.cancel();
+	}
+	@Inject(method = "text(Lnet/minecraft/client/gui/Font;Ljava/lang/String;IIIZ)V", at = @At("HEAD"), cancellable = true)
+	private void liquidum$deferBackgroundTextStr(net.minecraft.client.gui.Font font, String text, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isInForegroundReplay()) return;
+		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
+		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
+		LiquidGlassRenderer.deferText(font, net.minecraft.network.chat.Component.literal(text), x, y, color, shadow);
+		ci.cancel();
+	}
+	@Inject(method = "text(Lnet/minecraft/client/gui/Font;Lnet/minecraft/util/FormattedCharSequence;IIIZ)V", at = @At("HEAD"), cancellable = true)
+	private void liquidum$deferBackgroundTextSeq(net.minecraft.client.gui.Font font, net.minecraft.util.FormattedCharSequence text, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.deferForeground()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isInForegroundReplay()) return;
+		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
+		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
+		LiquidGlassRenderer.deferSeqText(font, text, x, y, color, shadow);
+		ci.cancel();
+	}
+
+	// Text always one layer above its base
+	@Inject(method = "text(Lnet/minecraft/client/gui/Font;Lnet/minecraft/network/chat/Component;IIIZ)V", at = @At("HEAD"))
+	private void liquidum$textAboveBase(net.minecraft.client.gui.Font font, net.minecraft.network.chat.Component text, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		liquidum$pushTextLayer();
+	}
+
+	@Inject(method = "text(Lnet/minecraft/client/gui/Font;Ljava/lang/String;IIIZ)V", at = @At("HEAD"))
+	private void liquidum$textAboveBaseStr(net.minecraft.client.gui.Font font, String text, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		liquidum$pushTextLayer();
+	}
+
+	@Inject(method = "text(Lnet/minecraft/client/gui/Font;Lnet/minecraft/util/FormattedCharSequence;IIIZ)V", at = @At("HEAD"))
+	private void liquidum$textAboveBaseSeq(net.minecraft.client.gui.Font font, net.minecraft.util.FormattedCharSequence text, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		liquidum$pushTextLayer();
+	}
+
+	private void liquidum$pushTextLayer() {
+		if (!LiquidGlassRenderer.isEnabled()) return;
+		if (!LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isInForegroundReplay()) return;
+		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
+		if (screen == null) return;
+		if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(screen)) return;
+		com.liquidum.client.shader.LiquidumLayers.beginText(this.liquidum$extractor());
 	}
 
 	/** Caster для передачи extractor в renderer без статического контекста. */

@@ -2,12 +2,15 @@
 
 uniform sampler2D InSampler;
 uniform sampler2D PrevSampler;   // captured previous tab frame (uiprev target)
+uniform sampler2D BlurredSampler;
+uniform sampler2D ColorFieldSampler;
+uniform sampler2D DeepFieldSampler;
 
 #define MAX_PANELS 128
 #define MAX_WELLS 12
 layout(std140) uniform GlassConfig {
     vec4 uRects[MAX_PANELS];
-    vec4 uMats[MAX_PANELS]; // x = material id: 0 BASE, 1 SLOT, 2 GROUP, 3 CONTROL, 4 COMPANION, 5 ACTIVE, 6 DENSE
+    vec4 uMats[MAX_PANELS]; // x = mat id 0..7, y = elevation 0..6
     vec4 uWells[MAX_WELLS * 3]; // grid well descriptors (see below)
     vec4 uParams;
     vec4 uMeta;     // (count, fuseRadius, ringY, ringX)
@@ -24,6 +27,8 @@ layout(std140) uniform GlassConfig {
     vec4 uTone;     // appearance: (darkness 0..1 smoothed, tintR, tintG, tintB)
     vec4 uDockParams; // dock: (outerPad, cornerRadius, refraction, density) — §7
     vec4 uLightDir; // light: (x, y, intensity, 0) — rim follows light (§ rim)
+    vec4 uSun;      // WOW sun: (linear r, g, b of the dominant light, specMaster 0..2)
+    vec4 uBleed;    // (bodyBleed, edgeBleed, chroma, 0)
 };
 
 in vec2 texCoord;
@@ -33,12 +38,55 @@ float sdRoundedBox(vec2 p, vec2 b, float r) {
     vec2 q = abs(p) - b + r;
     return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
 }
+float sdSquircle(vec2 p, vec2 b, float r) {
+    vec2 q = abs(p) - b + r;
+    vec2 m = max(q, 0.0);
+    float l = pow(pow(m.x, 4.0) + pow(m.y, 4.0), 0.25);
+    return min(max(q.x, q.y), 0.0) + l - r;
+}
+float sdGlassBox(vec2 p, vec2 b, float r) {
+    return (min(b.x,b.y) > 20.0) ? sdSquircle(p,b,r) : sdRoundedBox(p,b,r);
+}
+vec2 glassNormal(vec2 p, vec2 b, float r) {
+    vec2 q = abs(p) - b + r;
+    // inside: closest side
+    if (max(q.x, q.y) < 0.0) {
+        if (q.x > q.y) return vec2(sign(p.x), 0.0);
+        else return vec2(0.0, sign(p.y));
+    }
+    vec2 m = max(q, 0.0);
+    float l = length(m);
+    if (l < 1e-4) return vec2(0.0, sign(p.y));
+    // for squircle, approximate with same as rounded (good enough for direction)
+    return normalize(m * sign(p));
+}
+float sdTri(vec2 p, float r) {
+    const float k = 1.7320508;
+    p.x = abs(p.x) - r;
+    p.y = p.y + r / k;
+    if (p.x + k * p.y > 0.0) p = vec2(p.x - k * p.y, -k * p.x - p.y) / 2.0;
+    p.x -= clamp(p.x, -2.0 * r, 0.0);
+    return -length(p) * sign(p.y);
+}
 
 // Polynomial smooth minimum (opSmoothUnion lineage): fuses nearby panels into
 // one continuous metaball blob instead of hard overlaps.
 float smin(float a, float b, float k) {
     float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
     return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+// HUD icon halos: heart and drumstick SDF in unit space, rim follows the sprite
+float sdHeart(vec2 p) {
+    float lobeL = length(p - vec2(-0.34, 0.30)) - 0.42;
+    float lobeR = length(p - vec2(0.34, 0.30)) - 0.42;
+    float chin = sdTri(vec2(p.x, -(p.y + 0.10)), 1.0);
+    return smin(smin(lobeL, lobeR, 0.18), chin, 0.18);
+}
+float sdMeat(vec2 p) {
+    float blob = length((p - vec2(-0.12, 0.18)) / vec2(1.0, 0.92)) - 0.52;
+    float bone = sdGlassBox(p - vec2(0.38, -0.38), vec2(0.30, 0.16), 0.14);
+    return smin(blob, bone, 0.15);
 }
 
 // Procedural glass texture (OverShifted/LiquidGlass: "blur, noise and glow"):
@@ -64,14 +112,50 @@ vec3 blur25(vec2 uv, vec2 texel, float r) {
     }
     return sum / total;
 }
+vec3 blur25Half(vec2 uv, vec2 texel, float r) {
+    float w[5] = float[5](1.0, 4.0, 6.0, 4.0, 1.0);
+    vec3 sum = vec3(0.0);
+    float total = 0.0;
+    for (int dx = -2; dx <= 2; dx++) {
+        for (int dy = -2; dy <= 2; dy++) {
+            float wgt = w[dx + 2] * w[dy + 2];
+            sum += texture(BlurredSampler, uv + vec2(dx, dy) * texel * r).rgb * wgt;
+            total += wgt;
+        }
+    }
+    return sum / total;
+}
+
+vec3 treatHole(vec3 w) {
+    float hl = dot(w, vec3(0.299, 0.587, 0.114));
+    vec3 hs = clamp(mix(w, vec3(hl), 0.22), 0.05, 0.95);
+    vec3 hw = mix(w, hs, 0.38);
+    float hb = smoothstep(0.60, 0.92, hl);
+    hw *= 1.0 - hb * 0.16;
+    hw = mix(hw, vec3(hl), hb * 0.18);
+    hw += (1.0 - smoothstep(0.04, 0.22, hl)) * 0.05;
+    hw = mix(hw, hw * vec3(0.88, 0.96, 1.08) + vec3(0.02, 0.03, 0.05), 0.28);
+    hw = mix(vec3(dot(hw, vec3(0.299, 0.587, 0.114))), hw, 1.15);
+    hw *= 1.0 - smoothstep(0.60, 0.85, hl) * 0.12;
+    hw *= mix(1.0, 0.55, clamp(clamp(uTone.x, 0.0, 1.0) * 0.8, 0.0, 1.0));
+    float htStr = clamp(uWellMeta.z, 0.0, 1.0);
+    if (htStr > 0.001) {
+        vec3 hTint = clamp(uTone.yzw, vec3(0.05), vec3(1.0));
+        vec3 hHue = hTint / max(dot(hTint, vec3(0.333)), 0.06);
+        hw *= mix(vec3(1.0), mix(vec3(1.0), hHue, 0.45), htStr * 0.15);
+    }
+    hw = hw * (1.0 + 0.04 * smoothstep(0.15, 0.55, hl)) + vec3(0.030, 0.033, 0.038) * smoothstep(0.15, 0.55, hl);
+    return hw;
+}
 
 void main() {
     // gl_FragCoord = framebuffer pixels (bottom-origin); uv = 0..1 over screen.
-    	vec2 px = gl_FragCoord.xy;
-    	vec2 uv = px / uScreen.xy;
-    	vec2 texel = 1.0 / uScreen.xy;
+    vec2 px = gl_FragCoord.xy;
+    vec2 uv = px / uScreen.xy;
+    vec2 texel = 1.0 / uScreen.xy;
+    vec2 texelHalf = texel * 1.538; // 1/0.65 for 0.65x blurred target
 
-    	// Local world luminance under this pixel (cheap centre tap). Used to tame
+    // Local world luminance under this pixel (cheap centre tap). Used to tame
     	// glare / chromatic fringe on bright worlds (snow) and to lift dark worlds
     	// (Nether) — adaptive optical material, no fullscreen dim (P2).
     	float bgL = dot(texture(InSampler, uv).rgb, vec3(0.299, 0.587, 0.114));
@@ -118,20 +202,56 @@ void main() {
     vec2 uvT = uv - vec2(0.0, offNew / uScreen.y); // tile-space sample
     float fuseK = max(uMeta.y, 0.0);
     float bestMask = 0.0;
+    float slotCoreMask = 0.0;
     float dfold = 1e9;      // fused SDF across all panels
+    float foldElev = 0.0;   // elev of the fold bucket, bridges form inside one elev only
+    float foldGrp = 0.0;    // fuse group of the fold, bridges form inside one group only
+    float dminFold = 1e9;   // hard min across all, waist source for the global bridge
+    float dfuse0 = 1e9;     // union rim field of group 0
+    bool isoFuse0 = false;
+    float dmin0 = 1e9;      // hard min of group 0, depth source for the union test
+    float dfuseElev0 = 1e9;
+    float dfuseElev1 = 1e9; // elev of the group 0 bucket, same-height gate
+    float dfuse1 = 1e9;     // union rim field of group 1 (book plus active tab)
+    bool isoFuse1 = false;
+    float dmin1 = 1e9;
     bool isoFold = false;   // dfold currently belongs to a fusion-exempt tile
     float reachAcc = 0.0;   // proximity-weighted lens reach
     float densAcc = 0.0;    // proximity-weighted "dense HUD" factor
     float slotAcc = 0.0;    // proximity-weighted "slot cell" factor
     float groupAcc = 0.0;   // proximity-weighted "functional group" factor
     float controlAcc = 0.0; // proximity-weighted "interactive glass" factor
+    float controlMax = 0.0; // max w for control — no dilution when many
+    float nearestReach = 4.0;
     float compAcc = 0.0;    // proximity-weighted "companion surface" factor
     float activeAcc = 0.0;  // proximity-weighted "active/selected" factor
     float dockAcc = 0.0;    // proximity-weighted "luminance dock" factor
+    float iconRim = 0.0;    // per-icon rim ring, survives neighbour overlap
     vec2 dirAcc = vec2(0.0);
     float wsum = 0.0;
-    float dNear = 1e9;      // nearest tile — fallback direction source
+    float dNear = 1e9;
+    float nearGrp = -1.0;      // nearest tile — fallback direction source
+    float dNearSlot = 1e9;
     vec2 nearDir = vec2(0.0, 1.0);
+    vec2 nearCenter = vec2(0.0); vec2 nearHalf = vec2(4.0);
+    // Topmost covering solid tile wins, submission order is paint order.
+    // Same fuse-group + same physical height melts into one object (no cover),
+    // higher elevation covers lower, same elev but different group covers by paint order.
+    int topIdx = -1;
+    float topD = 1e9;
+    vec2 topDir = vec2(0.0, 1.0);
+    float topReach = 4.0;
+    float topMat = -1.0;
+    float topElev = -1e9;
+    float topGrp = 0.0;
+    vec2 topC = vec2(0.0);
+    vec2 topHalf = vec2(4.0);
+    float topOut = 1e9;
+    float topFused = 1e9;   // smin within the top bucket only, buried edges stay hidden
+    float topMin = 1e9;     // hard min within the top bucket, waist source
+    int topCoverCount = 0;  // covering tiles inside the top bucket
+    bool topFusable = false;
+    int coverCountAll = 0; // solid non-slot tiles covering px, any layer
 
     // Материальные роли Liquidum: 0 BASE, 1 SLOT, 2 GROUP, 3 CONTROL,
     // 4 COMPANION, 5 ACTIVE, 6 DENSE(HUD), 7 DOCK. Один материал — разные параметры.
@@ -139,16 +259,16 @@ void main() {
         if (i >= uCount) break;
         vec4 rect = uRects[i];
         float matId = uMats[i].x;
+        float elev = uMats[i].y;
+        float fgrp = uMats[i].z;
         bool dense = matId > 5.5 && matId < 6.5;           // MAT_DENSE
         bool dock = matId > 6.5;                           // MAT_DOCK
         bool slot = matId > 0.5 && matId < 1.5;         // MAT_SLOT
-        bool fusable = !dense && !slot && !dock;        // только они не сливаются
+        bool fusable = !dense && !slot && !dock; // same-layer tiles fuse into one element
         vec2 halfSize = abs(rect.zw);
         if (halfSize.x <= 0.0 || halfSize.y <= 0.0) continue;
 
         vec2 radial = pxT - rect.xy;
-        vec2 dir = radial / max(length(radial), 1e-4);
-
         float radF = clamp(uParams.x, 0.0, 1.0) * (dense ? 1.35 : 1.0);
         // Cap corner radius to a MODEST ABSOLUTE value (gui-scale aware) so a
         // tall, narrow panel (Recipe Book / companion) never collapses into a
@@ -156,32 +276,132 @@ void main() {
         float guiScale = max(uRing.w / 4.0, 0.5);
         bool isComp = matId > 3.5 && matId < 4.5;
         bool isDock = matId > 6.5;
-        float rCap = isDock ? max(uDockParams.y, 0.0) : (isComp ? 15.0 : 14.0) * guiScale;
-        float d = sdRoundedBox(radial, halfSize, min(radF * min(halfSize.x, halfSize.y), rCap));
+        float rCap = isDock ? max(uDockParams.y, 0.0) : min(16.0 * guiScale, min(halfSize.x, halfSize.y) * 0.35);
+        // Shape select from uMats w: integer part 0 box, 1 triangle, 2 circle.
+        // Fraction 0.0 keeps the legacy auto corner, else explicit 0..1.
+        float shapeW = uMats[i].w;
+        float shapeId = floor(shapeW + 0.0001);
+        float cornerF = shapeW - shapeId;
+        bool isTri = shapeId > 0.5 && shapeId < 1.5;
+        bool isCircle = shapeId > 1.5 && shapeId < 2.5;
+        bool isHeart = shapeId > 2.5 && shapeId < 3.5;
+        bool isMeat = shapeId > 3.5 && shapeId < 4.5;
+        float cornerOv = cornerF < 0.25 ? -1.0 : clamp((cornerF - 0.5) / 0.499, 0.0, 1.0);
+        float minHalf = min(halfSize.x, halfSize.y);
+        float d;
+        vec2 dir;
+        if (isCircle) {
+            float rl = length(radial);
+            d = rl - minHalf;
+            dir = rl > 1e-3 ? radial / rl : vec2(0.0, 1.0);
+        } else if (isTri) {
+            float triR = min(halfSize.x / 0.8660254, halfSize.y / 0.75);
+            d = sdTri(radial, triR);
+            float rl = length(radial);
+            dir = rl > 1e-3 ? radial / rl : vec2(0.0, 1.0);
+        } else if (isHeart && !dock) {
+            d = sdHeart(radial / minHalf) * minHalf;
+            float rl = length(radial);
+            dir = rl > 1e-3 ? radial / rl : vec2(0.0, 1.0);
+        } else if (isMeat && !dock) {
+            d = sdMeat(radial / minHalf) * minHalf;
+            float rl = length(radial);
+            dir = rl > 1e-3 ? radial / rl : vec2(0.0, 1.0);
+        } else {
+            // Etalon pill is a full capsule, panels keep the fraction
+            bool hero = (matId > 2.5 && matId < 3.5) || (matId > 4.5 && matId < 5.5);
+            float cornerR;
+            if (cornerOv >= 0.0) cornerR = cornerOv >= 0.98 ? minHalf : cornerOv * minHalf;
+            else cornerR = hero ? minHalf * 0.5 : min(radF * minHalf, rCap);
+            d = sdGlassBox(radial, halfSize, cornerR);
+            dir = glassNormal(radial, halfSize, cornerR);
+        }
         // Slot wells: interior must be CLEAR (no glass colour), only wall is glass (§22-23)
         if (slot) {
-            float wWslot = 2.2 * guiScale;
-            float oDslot = sdRoundedBox(radial, halfSize + wWslot, min(radF * min(halfSize.x + wWslot, halfSize.y + wWslot), rCap));
-            float wallSlot = (1.0 - smoothstep(0.0, 1.5, -d)) * (1.0 - smoothstep(0.0, 1.5, oDslot));
+            float wWslot = 2.5 * guiScale;
+            float depthS = -d;
+            float wallSlot = smoothstep(0.0, 2.5, depthS) * (1.0 - smoothstep(wWslot, wWslot + 2.5, depthS));
             bestMask = max(bestMask, wallSlot);
+            slotCoreMask = max(slotCoreMask, smoothstep(0.0, 2.5, depthS));
         } else {
             bestMask = max(bestMask, 1.0 - smoothstep(-2.5, 2.5, d));
+        }
+        if (dock) {
+            float iconBand = smoothstep(-2.8, -0.6, d) * (1.0 - smoothstep(-0.6, 1.8, d));
+            iconRim = max(iconRim, iconBand);
         }
 
         // Far panels neither mask nor fuse — skip early (ALU saving).
         if (d > fuseK * 3.0 + 24.0) continue;
 
-        if (d < dNear) { dNear = d; nearDir = dir; }
+        if (d < dNear) { dNear = d; nearDir = dir; nearestReach = min(halfSize.x, halfSize.y); nearCenter = rect.xy; nearHalf = halfSize; nearGrp = fgrp; }
+        if (slot) dNearSlot = min(dNearSlot, d);
+        if (!slot) { topOut = min(topOut, max(d, 0.0)); }
 
         bool iso = !fusable;   // dense HUD panels and slots never fuse
+        // per-material fusion radius ChatGPT: GridWell 8 / Freeform 9-11 / GROUP 11-13 / large 14
+        float matFuse = fuseK;
+        if (slot) matFuse *= 0.62; // ~8.6 when fuseK=14 -> GridWell 8-9
+        else if (matId > 1.5 && matId < 2.5) matFuse *= 0.82; // GROUP 11-13
+        else if (matId > 3.5 && matId < 4.5) matFuse *= 0.92; // COMPANION large
+        // Book layer keeps legacy cross-height bridge, other layers melt inside one height only
+        bool bookGrp = abs(fgrp - 1.0) < 0.5;
+        // Solid cover claims the pixel, slots stay clear holes under glass.
+        // Same group + same height melts (no cover), higher elev covers lower,
+        // same elev but different group covers by paint order.
+        if (d < 0.0 && !slot) {
+            coverCountAll++;
+            if (topIdx < 0) {
+                topIdx = i; topD = d; topDir = dir; topReach = min(halfSize.x, halfSize.y);
+                topMat = matId; topElev = elev; topGrp = fgrp; topC = rect.xy; topHalf = halfSize;
+                topFused = d; topMin = d; topCoverCount = 1; topFusable = fusable;
+            } else {
+                bool sameLayer = abs(fgrp - topGrp) < 0.5;
+                bool sameHeight = abs(elev - topElev) <= 0.25;
+                bool bookPair = sameLayer && abs(topGrp - 1.0) < 0.5;
+                if (sameLayer && (sameHeight || bookPair) && fusable && topFusable) {
+                    topCoverCount++;
+                    topMin = min(topMin, d);
+                    if (matFuse > 0.0 && fuseK > 0.0) topFused = smin(topFused, d, min(matFuse, fuseK));
+                    else topFused = min(topFused, d);
+                } else if (elev > topElev + 0.25 || (abs(elev - topElev) <= 0.25 && i >= topIdx)) {
+                    topIdx = i; topD = d; topDir = dir; topReach = min(halfSize.x, halfSize.y);
+                    topMat = matId; topElev = elev; topGrp = fgrp; topC = rect.xy; topHalf = halfSize;
+                    topFused = d; topMin = d; topCoverCount = 1; topFusable = fusable;
+                }
+            }
+        }
+        // dense/dock already iso, no fuse
+        dminFold = min(dminFold, d);
         if (dfold > 1e8) {
             dfold = d;
             isoFold = iso;
-        } else if (!iso && !isoFold && fuseK > 0.0) {
-            dfold = smin(dfold, d, fuseK);
+            foldElev = elev;
+            foldGrp = fgrp;
+        } else if (!iso && !isoFold && matFuse > 0.0 && abs(fgrp - foldGrp) < 0.5
+            && (abs(elev - foldElev) <= 0.25 || (bookGrp && abs(foldGrp - 1.0) < 0.5))) {
+            dfold = smin(dfold, d, matFuse);
         } else {
             dfold = min(dfold, d);
             isoFold = false;
+        }
+        // Per-group union for clean shared rims (slots and dense HUD stay out,
+        // one-off groups never join a fold and keep their own rims).
+        // Group 1 is the book bridge (legacy cross-height), group 0 melts inside one height.
+        if (fusable && abs(fgrp - 1.0) < 0.5) {
+            if (dfuse1 > 1e8) { dfuse1 = d; isoFuse1 = false; dfuseElev1 = elev; dmin1 = d; }
+            else if (abs(elev - dfuseElev1) <= 0.25) {
+                if (matFuse > 0.0) dfuse1 = smin(dfuse1, d, matFuse);
+                else dfuse1 = min(dfuse1, d);
+                dmin1 = min(dmin1, d);
+            }
+        } else if (fusable && abs(fgrp) < 0.5) {
+            if (dfuse0 > 1e8) { dfuse0 = d; isoFuse0 = false; dfuseElev0 = elev; dmin0 = d; }
+            else if (abs(elev - dfuseElev0) <= 0.25) {
+                if (matFuse > 0.0) dfuse0 = smin(dfuse0, d, matFuse);
+                else dfuse0 = min(dfuse0, d);
+                dmin0 = min(dmin0, d);
+            }
         }
 
         // Proximity weight: the dominant panel drives refraction direction and
@@ -191,13 +411,14 @@ void main() {
         densAcc += (dense ? 1.0 : 0.0) * w;
         // Slot: interior должен быть CLEAR — учитываем только wall, не всю плитку (§22)
         if (slot) {
-            float wWslot2 = 2.2 * guiScale;
-            float oDslot2 = sdRoundedBox(radial, halfSize + wWslot2, min(radF * min(halfSize.x + wWslot2, halfSize.y + wWslot2), rCap));
-            float wallSlot2 = (1.0 - smoothstep(0.0, 1.5, -d)) * (1.0 - smoothstep(0.0, 1.5, oDslot2));
+            float wWslot2 = 2.5 * guiScale;
+            float depthS2 = -d;
+            float wallSlot2 = smoothstep(0.0, 2.5, depthS2) * (1.0 - smoothstep(wWslot2, wWslot2 + 2.5, depthS2));
             slotAcc += wallSlot2;
         }
         groupAcc += ((matId > 1.5 && matId < 2.5) ? 1.0 : 0.0) * w;
         controlAcc += ((matId > 2.5 && matId < 3.5) ? 1.0 : 0.0) * w;
+        controlMax = max(controlMax, ((matId > 2.5 && matId < 3.5) ? w : 0.0));
         compAcc += ((matId > 3.5 && matId < 4.5) ? 1.0 : 0.0) * w;
         activeAcc += ((matId > 4.5 && matId < 5.5) ? 1.0 : 0.0) * w;
         dockAcc += (dock ? 1.0 : 0.0) * w;
@@ -217,26 +438,119 @@ void main() {
     float compLevel = 0.0;  // COMPANION surface
     float activeLevel = 0.0;// ACTIVE/selected state
     float dockLevel = 0.0;  // LUMINANCE DOCK
+    // Same-group melt lifts coverage so joints read as one surface.
+    // dfold bridge covers any fuse group (Lab zOrder layers), dfuse0/1 keep legacy groups.
+    if (dmin0 < 1e8 && dfuse0 < 1e8) bestMask = max(bestMask, 1.0 - smoothstep(-2.5, 2.5, dfuse0));
+    if (dmin1 < 1e8 && dfuse1 < 1e8) bestMask = max(bestMask, 1.0 - smoothstep(-2.5, 2.5, dfuse1));
+    if (dfold < 1e8 && !isoFold && dminFold < 1e8) {
+        float waistG = dminFold - dfold;
+        if (waistG > 0.25) bestMask = max(bestMask, 1.0 - smoothstep(-2.5, 2.5, dfold));
+    }
     if (wsum > 0.0001) {
         bestD = dfold;
         // Fallback: at 4-tile intersections dirAcc cancels to ~zero and
         // normalize() blows up (dark dots). Use the nearest tile's direction.
         bestDir = length(dirAcc) > 1e-3 ? normalize(dirAcc)
                                         : ((dNear < 1e8) ? nearDir : vec2(0.0, 1.0));
-        reach = max(reachAcc / wsum, 4.0);
+        // for many controls, use per-tile direction to keep highlight as band, not point
+        if (controlLevel > 0.6 && dNear < 1e8) {
+            bestDir = nearDir;
+        }
+        // for control, use nearest reach, not averaged — no point for lower when many
+        if (controlLevel > 0.6) {
+            reach = max(nearestReach, 4.0);
+        } else {
+            reach = max(reachAcc / wsum, 4.0);
+        }
         bestEdge = smoothstep(-reach * 0.38, -reach * 0.02, bestD) * bestMask;
         density = clamp(densAcc / wsum, 0.0, 1.0);
         slotLevel = clamp(slotAcc / wsum, 0.0, 1.0);
         groupLevel = clamp(groupAcc / wsum, 0.0, 1.0);
-        controlLevel = clamp(controlAcc / wsum, 0.0, 1.0);
+        controlLevel = clamp(max(controlAcc / wsum, controlMax), 0.0, 1.0);
         compLevel = clamp(compAcc / wsum, 0.0, 1.0);
         activeLevel = clamp(activeAcc / wsum, 0.0, 1.0);
         dockLevel = clamp(dockAcc / wsum, 0.0, 1.0);
     }
+    // Covered pixels use the top layer only, lower glass stays hidden.
+    // A fused top bucket (same layer + same height, 2+ tiles) reads from its
+    // fused field, so buried edges cast no edge/bleed/highlight.
+    if (topIdx >= 0) {
+        bool topMelted = topCoverCount >= 2 && topFused < 1e8 && topMin < 1e8;
+        bestD = topMelted ? topFused : topD;
+        bestDir = topDir;
+        reach = max(topReach, 4.0);
+        density = topMat > 5.5 && topMat < 6.5 ? 1.0 : 0.0;
+        slotLevel = 0.0;
+        groupLevel = topMat > 1.5 && topMat < 2.5 ? 1.0 : 0.0;
+        controlLevel = topMat > 2.5 && topMat < 3.5 ? 1.0 : 0.0;
+        compLevel = topMat > 3.5 && topMat < 4.5 ? 1.0 : 0.0;
+        activeLevel = topMat > 4.5 && topMat < 5.5 ? 1.0 : 0.0;
+        dockLevel = topMat > 6.5 ? 1.0 : 0.0;
+        bestEdge = smoothstep(-reach * 0.38, -reach * 0.02, bestD) * bestMask;
+        // Fused bridge interior reads flat: no edge bend where one object continues
+        float layFB = 1e9;
+        if (topMelted) layFB = topFused;
+        else if (abs(topGrp - 1.0) < 0.5) layFB = dfuse1;
+        else if (abs(topGrp) < 0.5) layFB = dfuse0;
+        if (layFB < 1e8) {
+            float bridge = (topMelted ? topMin : topD) - layFB;
+            bestEdge *= 1.0 - smoothstep(0.3, 2.0, bridge) * (1.0 - smoothstep(5.0, 9.0, bridge));
+        }
+    }
+    // Union field stays flat inside on its own, no waist term
+    // Smooth radial normal from the covering tile centre, no SDF seams
+    vec2 covC = topIdx >= 0 ? topC : nearCenter;
+    vec2 covH = topIdx >= 0 ? topHalf : nearHalf;
+    vec2 relN = (pxT - covC) / max(covH, vec2(1.0));
+    vec2 edgeN = relN / max(length(relN), 1e-3);
+    // Solo stages for Lab rework, direction as color, seams glow
+    if (mode == 10) {
+        fragColor = vec4(edgeN * 0.5 + 0.5, 0.0, 1.0);
+        return;
+    }
+    if (mode == 14) {
+        float e = topIdx >= 0 ? clamp(topElev / 6.0, 0.0, 1.0) : 0.0;
+        fragColor = vec4(vec3(e), 1.0);
+        return;
+    }
+    // FUSION lanes: default 10+ cycles colors, explicit 0-3 keep theirs
+    if (mode == 15) {
+        float gRaw = topIdx >= 0 ? topGrp : nearGrp;
+        float g = gRaw > 9.5 && gRaw < 999.5 ? mod(gRaw - 10.0, 4.0) : gRaw;
+        vec3 c = vec3(0.05);
+        if (g > -0.5 && g < 0.5) c = vec3(1.0, 0.25, 0.25);
+        else if (g > 0.5 && g < 1.5) c = vec3(0.25, 1.0, 0.25);
+        else if (g > 1.5 && g < 2.5) c = vec3(0.3, 0.5, 1.0);
+        else if (g > 2.5 && g < 999.5) c = vec3(1.0, 0.85, 0.3);
+        else if (g > 999.5) c = vec3(0.75, 0.35, 1.0);
+        if (topIdx >= 0 && topCoverCount >= 2) c = mix(c, vec3(1.0), 0.4);
+        fragColor = vec4(c, 1.0);
+        return;
+    }
+    float effDensity = max(density, controlLevel * 0.50);
+    float guiScaleE = max(uRing.w / 4.0, 0.5);
+    float minHalfGui = min(covH.x, covH.y) / guiScaleE;
+    float sizeK = clamp((minHalfGui - 10.0) / 50.0, 0.0, 1.0);
+    effDensity = clamp(effDensity + sizeK * 0.22, 0.0, 1.0);
 
     // MODE 1: mask visualization (cyan glow = tiles).
     if (mode == 1) {
         fragColor = vec4(vec3(0.0, bestMask * 0.8, bestMask * 0.8), 1.0);
+        return;
+    }
+    // Solo stages for Lab rework, one layer at a time
+    if (mode == 7) {
+        float v = clamp(0.5 - bestD * 0.04, 0.0, 1.0);
+        fragColor = vec4(vec3(v), 1.0);
+        return;
+    }
+    if (mode == 8) {
+        fragColor = vec4(vec3(bestEdge), 1.0);
+        return;
+    }
+    if (mode == 9) {
+        vec3 b = blur25Half(uv, texelHalf, min(max(frostR, 2.0) * 0.65, 2.0));
+        fragColor = vec4(b, 1.0);
         return;
     }
 
@@ -269,27 +583,28 @@ void main() {
         float ri = clamp(floor((A.xy.y - px.y) / pitch.y + 0.5), 0.0, B.w - 1.0);
         vec2 cc = A.xy + vec2(ci * pitch.x, -ri * pitch.y);
         float radFw = clamp(uParams.x, 0.0, 1.0) * 0.9;
-        float d = sdRoundedBox(px - cc, A.zw, radFw * min(A.z, A.w));
+        float d = sdGlassBox(px - cc, A.zw, radFw * min(A.z, A.w));
         // wall / core for this cell
         float gsc = max(uRing.w / 4.0, 0.5);
         float rf = clamp(uParams.x, 0.0, 1.0) * 0.9;
-        float wW = 3.0 * gsc;
-        float iD = sdRoundedBox(px - cc, A.zw, rf * min(A.z, A.w));
-        float oD = sdRoundedBox(px - cc, A.zw + wW, rf * min(A.z + wW, A.w + wW));
-        float core = smoothstep(0.0, 1.5, -iD) * (1.0 - smoothstep(0.0, 1.5, oD));
-        float wallBand = (1.0 - smoothstep(0.0, 1.5, -iD)) * (1.0 - smoothstep(0.0, 1.5, oD));
-        // wall is the glass wall ring, core is the clear hole interior
-        if (wallBand > wellMask || core > coreMask) {
-            if (wallBand > wellMask) {
-                wellMask = wallBand;
+        float wW = 2.5 * gsc;
+        float innerR = min(max(rf * min(A.z, A.w) + 1.0, 1.2 * gsc), min(A.z, A.w));
+        float iD = sdGlassBox(px - cc, A.zw, innerR);
+        float oD = sdGlassBox(px - cc, A.zw + wW, innerR + wW);
+        float soft = 2.5;
+        float core = smoothstep(0.0, soft, -iD);
+        float prof = sin(3.14159 * clamp(-iD / wW, 0.0, 1.0));
+        if (prof > wellMask || core > coreMask) {
+            if (prof > wellMask) {
+                wellMask = prof;
                 cellC = cc;
                 cellHalf = A.zw;
                 wellHover = (ci == C.x && ri == C.y) ? 1.0 : 0.0;
             }
             coreMask = max(coreMask, core);
             vec2 inward = (length(px - cc) > 1e-3) ? normalize(cc - px) : vec2(0.0, 1.0);
-            float wf = clamp(iD / wW, 0.0, 1.0);
-            wellBend += inward * wallBand * (1.0 - wf) * (2.0 + 3.0 * wellHover) / uScreen.xy;
+            float bendWellPx = min((7.0 + 5.0 * wellHover) * (0.35 + 0.65 * (uParams.y / 15.0)), min(A.z, A.w) * 0.6);
+            wellBend += inward * prof * bendWellPx / uScreen.xy;
         }
     }
 
@@ -307,7 +622,7 @@ void main() {
     if (uFxChannel.z > 1.0) {
         vec2 chc = vec2(uFxChannel.x + uFxChannel.z * 0.5, uFxChannel.y);
         vec2 chh = vec2(uFxChannel.z * 0.5, uFxChannel.w);
-        float cd = sdRoundedBox(px - chc, chh, chh.y * 0.8);
+        float cd = sdGlassBox(px - chc, chh, chh.y * 0.8);
         float groove = 1.0 - smoothstep(0.5, 1.6, abs(cd));
         fxDark += groove * 0.07;                     // слабый idle-желоб
         float fillX = uFxChannel.x + uFxChannel.z * clamp(uWellMeta.y, 0.0, 1.0);
@@ -321,7 +636,7 @@ void main() {
     slotLevel = max(slotLevel, wellMask);
 
     vec2 lightDir = normalize(uLightDir.xy + vec2(0.0001,0.0001));
-    float lightDot = dot(bestDir, lightDir);
+    float lightDot = dot(edgeN, lightDir);
     float lightBias = clamp(0.5 + 0.5 * lightDot, 0.0, 1.0);
     float topBias = clamp(0.65 + lightBias * 0.55, 0.0, 1.0);
 
@@ -335,8 +650,10 @@ void main() {
     float pmask = 0.0;
     vec2 panelC = uPanel.xy + vec2(0.0, offNew); // bottom-origin: +y = up
     if (uPanel.z > 0.5) {
-        float pd = sdRoundedBox(px - panelC, uPanel.zw, uRing.w);
+        float pd = sdGlassBox(px - panelC, uPanel.zw, uRing.w);
         pmask = 1.0 - smoothstep(-1.0, 1.0, pd);
+        pmask *= 1.0 - coreMask;
+        pmask *= 1.0 - slotCoreMask;
         if (pmask > 0.001) {
             float edge = smoothstep(-8.0, -1.5, pd);
             vec2 cdir = (px - uPanel.xy) / max(length(px - uPanel.xy), 1e-4);
@@ -393,15 +710,14 @@ void main() {
             // Uneven glass: gentle light from above + broad smudge patches —
             // a big panel must NOT read as one flat grey rectangle.
             base *= 1.0 + 0.05 * smoothstep(-uPanel.w, uPanel.w, (px - panelC).y);
-            base *= 1.0 + (hash12(floor(px / 96.0)) - 0.5) * 0.06;
-            base += (hash12(floor(px / 2.0)) - 0.5) * 0.008;
+            // hash OFF
             // Appearance на панели: DARK затемняет тело внутри mask
             // (мир за ним не трогается), custom tint у BASE минимальный.
             base *= mix(1.0, 0.42, clamp(uTone.x, 0.0, 1.0));
             vec3 pTint = clamp(uTone.yzw, vec3(0.05), vec3(1.0));
             float ptStr = clamp(uWellMeta.z, 0.0, 1.0);
             vec3 pHue = pTint / max(dot(pTint, vec3(0.333)), 0.06);
-            base *= mix(vec3(1.0), mix(vec3(1.0), pHue, 0.6), ptStr * 0.12);
+            base *= mix(vec3(1.0), mix(vec3(1.0), pHue, 0.35), ptStr * 0.12);
             // TAB TRANSITION: the captured OLD tab frame slides UP and away
             // (clipped by the FINAL panel rect), revealing the new content.
             if (anim) {
@@ -419,9 +735,28 @@ void main() {
     }
     float inPanel = smoothstep(0.0, 1.0, pmask);
 
+    vec2 parShift = vec2(0.0);
+    // DENSE bar and DOCK keep parallax whenever they exist, hotbar drifts the same with inventory open or closed
+    if (uPar.z > 0.0 && (uPanel.z <= 0.5 || pmask > 0.3 || density > 0.5 || dockLevel > 0.5)) {
+        vec2 toM = uPar.xy - px;
+        float md = length(toM);
+        float fall = 1.0 - smoothstep(0.0, 200.0, md);
+        parShift = (toM / max(md, 1e-3)) * fall * uPar.z / uScreen.xy;
+    }
+    vec2 uvP = uvT + parShift;
+
     if (bestMask <= 0.001 && wellMask <= 0.001) {
         // Outside tiles: world, or the panel where it exists.
-        fragColor = vec4(mix(texture(InSampler, uv).rgb, panelBase, pmask)
+        vec3 w = texture(InSampler, uv).rgb;
+        float edgeFeather = 1.0 - smoothstep(0.0, 9.0, dNear);
+        if (edgeFeather > 0.001) w = mix(w, texture(BlurredSampler, uv).rgb, edgeFeather * 0.45);
+        float hole = max(coreMask, slotCoreMask);
+        if (hole > 0.001) {
+            vec3 holeFrost = mix(texture(BlurredSampler, uv).rgb, texture(ColorFieldSampler, uv).rgb, 0.45);
+            float holeK = frostR > 0.5 ? 0.9 : 0.25;
+            w = mix(w, holeFrost, hole * holeK);
+        }
+        fragColor = vec4(mix(w, panelBase, pmask)
             * (1.0 - fxDark) + fxAdd, 1.0);
         return;
     }
@@ -430,40 +765,95 @@ void main() {
     vec2 mouse = uScreen.zw;
     float hover = hoverOn ? (1.0 - smoothstep(20.0, 70.0, length(px - mouse))) : 0.0;
 
-    // Rim band: width ADAPTS to element size + control gets slightly wider
-    // (иначе на маленьких кнопках rim выглядел обрубком). Outer side follows light.
-    float rimW = clamp(reach * (0.14 + 0.06 * controlLevel), 1.4 + 0.4 * controlLevel, 4.5);
-    float rimBand = smoothstep(-rimW - density * 1.5, -1.0, bestD)
-        * (1.0 - smoothstep(-1.0, 1.5 + density * 0.5, bestD));
-    float refr = bestEdge * (1.0 - rimBand * 0.45) * (1.0 + hover * 0.6) * (1.0 - slotLevel * 0.7);
+    // WOW SUN preamble: true light colour from Java (noon white / sunset
+    // orange / torch warm / Nether red / End violet). Falls back to neutral
+    // warm-white if Java hasn't written it yet (all-zero UBO).
+    vec3 sunCol = clamp(uSun.rgb, vec3(0.0), vec3(1.5));
+    if (dot(sunCol, sunCol) < 1e-4) sunCol = vec3(1.0, 0.98, 0.94);
+    float sunMaster = clamp(uSun.a, 0.0, 2.0);
+    float sunI = uLightDir.z * clamp(uLightDir.w + 0.35, 0.0, 1.0);
+
+    // Flat front, edge-only bend, dome volume removed.
+    // Fused top bucket reads its fused field (no buried rim), cover reads own edge.
+    float rimSDF = topD;
+    float layFuse = 1e9;
+    bool topMeltRim = topIdx >= 0 && topCoverCount >= 2 && topFused < 1e8 && topMin < 1e8;
+    if (topIdx < 0) {
+        float waist = 0.0;
+        if (dmin0 < 1e8) waist = max(waist, dmin0 - dfuse0);
+        if (dmin1 < 1e8) waist = max(waist, dmin1 - dfuse1);
+        if (dminFold < 1e8 && dfold < 1e8) waist = max(waist, dminFold - dfold);
+        rimSDF = (controlLevel > 0.6 && waist <= 0.3) ? dNear : bestD;
+    } else if (topMeltRim) {
+        rimSDF = topFused;
+        layFuse = topFused;
+    } else {
+        // Union rim where a same-group partner deepens the field, own edge elsewhere
+        // Buried edge (partner just below the border) draws no rim at all
+        float layMin = 1e9;
+        if (abs(topGrp - 1.0) < 0.5) { layFuse = dfuse1; layMin = dmin1; }
+        else if (abs(topGrp) < 0.5) { layFuse = dfuse0; layMin = dmin0; }
+        float coverDiff = topD - dNear;
+        if (coverDiff > 0.5 && coverDiff < 6.0 && layFuse < 1e8) rimSDF = layFuse;
+        else if (layFuse < 1e8 && layMin < 1e8 && (layMin - layFuse) > 0.3) rimSDF = layFuse;
+    }
+    float edgeW = clamp(mix(1.75, 1.45, clamp(controlLevel,0.0,1.0)) + 0.018 * reach, 1.35, 2.1);
+    float rimBand = smoothstep(-edgeW, -0.75, rimSDF) * (1.0 - smoothstep(-0.75, 2.2, rimSDF));
+    // Inner edge sits over lower glass, outer edge over world
+    float overGlass = (topIdx >= 0 && coverCountAll > topCoverCount) ? 1.0 : 0.0;
+    rimBand *= 1.0 - overGlass * 0.85;
+    // Bend lives in a fixed rim ring, centre stays flat at any size
+    float edgeFactor = 1.0 - smoothstep(0.0, 7.0, max(-bestD, 0.0));
+    float matRefraction = 13.0; // Etalon edge warp strength
+    float refr = bestEdge * edgeFactor * (1.0 - rimBand * 0.35) * (1.0 + hover * 0.22) * (1.0 - slotLevel * 0.55);
     // Внутри Well рефракция почти нулевая — это плоское углубление,
     // не линза; hover-ячейка сохраняет чуть живой отклик.
     refr *= 1.0 - wellMask * (0.9 - wellHover * 0.4);
+    // Solid fused core bends nothing: one flat glass, no directional seams.
+    // Top-bucket melt flattens its own interior, legacy groups keep their waist.
+    if (topIdx >= 0 && bestD < -2.0) {
+        if (topMeltRim) refr *= 1.0 - clamp((topMin - topFused) / 2.0, 0.0, 1.0);
+        else {
+            float cMin = abs(topGrp - 1.0) < 0.5 ? dmin1 : (abs(topGrp) < 0.5 ? dmin0 : 1e9);
+            float cFuse = abs(topGrp - 1.0) < 0.5 ? dfuse1 : (abs(topGrp) < 0.5 ? dfuse0 : 1e9);
+            if (cMin < 1e8 && cFuse < 1e8) refr *= 1.0 - clamp((cMin - cFuse) / 2.0, 0.0, 1.0);
+        }
+    }
     // Geometric density (iOS model): thicker glass BENDS more — refraction
     // scales with density instead of the material turning opaque.
-    vec2 off = bestDir * (refr * uParams.y * (1.0 + 0.7 * density)) / uScreen.xy;
-    off += wellBend;   // concave well: background dips inward (P1)
-
-    // Chromatic aberration — subtle dispersion PROPORTIONAL to the refraction
-    // vector. DISABLED on dense panels: on small tiles the lens covers the
-    // whole cell and the split turns into rainbow fringing around every slot.
-            float ab = aberrationOn ? 0.12 * (1.0 - density) * (1.0 - smoothstep(0.58, 0.92, bgL) * 0.85) : 0.0;
-
-    // PARALLAX layer 1 (shader): the world seen THROUGH a tile drifts AWAY
-    // from the cursor (the item icon on top drifts toward it — Java side).
-    // Falls off over ~160 gui px; sampling toward the mouse shifts the
-    // apparent content backward.
-    vec2 parShift = vec2(0.0);
-    // Parallax applies INSIDE the container panel (and in-world, where there
-    // is no panel) — tiles OUTSIDE it (creative tabs above the panel) stay
-    // static, so tab contents never drift.
-    if (uPar.z > 0.0 && (uPanel.z <= 0.5 || pmask > 0.3)) {
-        vec2 toM = uPar.xy - px;
-        float md = length(toM);
-        float fall = 1.0 - smoothstep(0.0, 200.0, md);
-        parShift = (toM / max(md, 1e-3)) * fall * uPar.z / uScreen.xy;
+    float refractionScale = uParams.y / 15.0; // normalize 15->1.0, keep Lab slider 0-15 working
+    float concaveK = clamp(slotLevel + wellMask, 0.0, 1.0);
+    vec2 lensN = edgeN;
+    if (topIdx < 0 && wsum > 0.0001) {
+        vec2 blendN = mix(edgeN, bestDir, 0.65);
+        if (length(blendN) > 1e-3) lensN = normalize(blendN);
     }
-    vec2 uvP = uvT + parShift;
+    // Near a same-group joint, bend with the fused field so one object bends as one
+    if (topIdx >= 0 && concaveK < 0.5) {
+        float jTop = topMeltRim ? topMin : topD;
+        float jFuse = topMeltRim ? topFused : layFuse;
+        if (jFuse < 1e8) {
+            float jointK = clamp((jTop - jFuse) / 3.0, 0.0, 1.0);
+            if (jointK > 0.01) {
+                vec2 jn = mix(lensN, bestDir, jointK * 0.7);
+                if (length(jn) > 1e-3) lensN = normalize(jn);
+            }
+        }
+    }
+    vec2 edgeOffPx = lensN * (refr * matRefraction * refractionScale * (1.0 + 0.42 * effDensity));
+    edgeOffPx = mix(edgeOffPx, -edgeOffPx * 0.9, concaveK);
+    vec2 off = edgeOffPx / uScreen.xy;
+    off += wellBend;
+    // Solo stage, pixel shift as color, still glass reads bright
+    if (mode == 11) {
+        vec2 v = clamp(off * uScreen.xy * 0.25, -1.0, 1.0);
+        fragColor = vec4(v * 0.5 + 0.5, 0.0, 1.0);
+        return;
+    }
+
+    // Edge bend dispersion only, centre stays clean
+            float bendPx = length(off * uScreen.xy);
+            float ab = aberrationOn ? (uBleed.z * 0.03 + bendPx * 0.008) * (1.0 - effDensity * 0.42) * (1.0 - smoothstep(0.58, 0.92, bgL) * 0.50) : 0.0;
 
     // Tiles INSIDE the frosted panel sample the panel base, not the world —
     // otherwise the world would bleed through the cells (wrong distortion at
@@ -472,22 +862,127 @@ void main() {
     sharp.r = mix(texture(InSampler, uvP + off * (1.0 - ab)).r, panelBase.r, inPanel);
     sharp.g = mix(texture(InSampler, uvP + off).g, panelBase.g, inPanel);
     sharp.b = mix(texture(InSampler, uvP + off * (1.0 + ab)).b, panelBase.b, inPanel);
+    // Rim stretch, backdrop smears outward at the thick edge only
+    if (rimBand > 0.003) {
+        vec3 stretch;
+        stretch.r = texture(InSampler, uvP + off * (1.7 - ab)).r;
+        stretch.g = texture(InSampler, uvP + off * 1.7).g;
+        stretch.b = texture(InSampler, uvP + off * (1.7 + ab)).b;
+        sharp = mix(sharp, stretch, rimBand * 0.6);
+    }
+    vec3 sharpWorld;
+    sharpWorld.r = texture(InSampler, uvP + off * (1.0 - ab)).r;
+    sharpWorld.g = texture(InSampler, uvP + off).g;
+    sharpWorld.b = texture(InSampler, uvP + off * (1.0 + ab)).b;
+    sharpWorld = mix(sharpWorld, texture(BlurredSampler, uvP + off).rgb, 0.45);
+    sharpWorld = treatHole(sharpWorld);
 
-    // Frosted body with a LENS profile (lensglass rule: never let the blur get
-    // as wide as the bend). Dense panels stay clearer; inside the panel the
-    // "blur" of the flat base is the base itself.
+    // Frosted body with a LENS profile and adaptive diffusion
     bool frostOn = frostR > 0.5;
     vec3 body = sharp;
+    float overlayK = inPanel * controlLevel;
+    float busyTileG = 0.0;
     if (frostOn) {
-        // FreeformWell: центр ячейки почти без frost — мутность только к кромке.
-        float localFrost = max(frostR * (1.0 - 0.65 * bestEdge) * (1.0 - 0.45 * density)
-            * (1.0 - 0.45 * slotLevel), 1.0);
-        body = mix(blur25(uvP + off, texel, localFrost), panelBase, inPanel);
+        vec3 sN2 = texture(InSampler, uvP + vec2(7.0, 0.0) / uScreen.xy).rgb;
+        vec3 sS2 = texture(InSampler, uvP - vec2(7.0, 0.0) / uScreen.xy).rgb;
+        vec3 sE2 = texture(InSampler, uvP + vec2(0.0, 7.0) / uScreen.xy).rgb;
+        vec3 sW2 = texture(InSampler, uvP - vec2(0.0, 7.0) / uScreen.xy).rgb;
+        float busyTile = clamp(max(max(length(sN2 - sharp), length(sS2 - sharp)), max(length(sE2 - sharp), length(sW2 - sharp))), 0.0, 1.0);
+        busyTileG = busyTile;
+        float roleFrost = clamp(1.0 + compLevel * 0.35 + groupLevel * 0.20 + density * 0.30 - controlLevel * 0.10, 0.7, 1.8);
+        float localFrost = max(frostR * (1.0 - 0.25 * effDensity) * (1.0 - 0.30 * slotLevel) * (1.0 + busyTile * 0.8 + sizeK * 0.35 - (1.0 - sizeK) * 0.10) * (1.0 - overlayK * 0.45) * roleFrost, 1.0);
+        float isFlat = 1.0 - smoothstep(-8.0, -2.0, bestD);
+        vec3 blurHalf = blur25Half(uvP + off, texelHalf, min(localFrost * 0.65, 1.5));
+        vec3 blurMix = blurHalf;
+        float wideW = clamp(isFlat * (0.80 + 0.20 * sizeK), 0.0, 1.0);
+        if (isFlat > 0.05) {
+            vec3 blurFull = blur25(uvP + off, texel, min(localFrost * 0.35, 3.2));
+            blurMix = mix(blurFull, blurHalf, wideW);
+        }
+        body = mix(blurMix, panelBase, inPanel);
+        // Low frequency world color, stronger for large glass
+        vec3 colorField = texture(ColorFieldSampler, uvP).rgb;
+        float cfLuma = dot(colorField, vec3(0.2126, 0.7152, 0.0722));
+        vec3 colorBlob = mix(vec3(cfLuma), colorField, 1.15 + 0.15 * sizeK);
+        body = mix(body, colorBlob, (0.30 + 0.020 * frostR + 0.15 * sizeK) * isFlat);
+        // Deep flat color for large glass, pattern dies at 0.125x
+        vec3 deepField = texture(DeepFieldSampler, uvP).rgb;
+        float deepLuma = dot(deepField, vec3(0.2126, 0.7152, 0.0722));
+        vec3 deepBlob = mix(vec3(deepLuma), deepField, 1.25);
+        float deepM = smoothstep(0.0, 0.3, sizeK) * isFlat;
+        body = mix(body, deepBlob, min((0.20 + 0.030 * frostR) * deepM, 1.0));
+        // Dock sharpness only on dock tiles, nearby bar keeps its own frost
+        body = mix(body, texture(InSampler, uv).rgb, clamp(dockLevel, 0.0, 1.0) * (topMat > 6.5 ? 1.0 : 0.0));
     }
 
-    // Near the rim blend in the sharp (aberrated) sample so dispersion survives
-    // the frost; the matte centre keeps its frosted density.
-    float sharpW = clamp(uParams.w + bestEdge * (frostOn ? 0.55 : 0.0), 0.0, 1.0);
+    // Sharp lives at the rim only, flat centre stays frosted blobs
+    float sharpW = clamp(bestEdge * (uParams.w * 0.6 + (frostOn ? 0.18 : 0.0)) + overlayK * 0.15 - busyTileG * 0.12, 0.0, 1.0);
+
+    // Layered glass: upper tile refracts the glass below instead of hiding it.
+    // Same fuse-group plus same height stays melted (one surface, no cover).
+    // Different layers composite back-to-front, lower rims read distorted.
+    if (topIdx >= 0 && coverCountAll > topCoverCount && bestMask > 0.001 && concaveK < 0.5) {
+        vec2 pxLow = pxT + edgeOffPx;
+        vec2 uvLow = clamp(uvP + off, vec2(0.001), vec2(0.999));
+        float lowMin = 1e9;
+        for (int j = 0; j < MAX_PANELS; j++) {
+            if (j >= uCount) break;
+            if (j == topIdx) continue;
+            vec4 lr = uRects[j];
+            float lm = uMats[j].x;
+            float le = uMats[j].y;
+            float lg = uMats[j].z;
+            // Stacked heights cover opaque, no glass through glass
+            if (abs(le - topElev) > 0.25) continue;
+            bool lslot = lm > 0.5 && lm < 1.5;
+            if (lslot) continue;
+            bool ldense = lm > 5.5 && lm < 6.5;
+            bool ldock = lm > 6.5;
+            bool lfus = !ldense && !lslot && !ldock;
+            vec2 lh = abs(lr.zw);
+            if (lh.x <= 0.0 || lh.y <= 0.0) continue;
+            bool sameLay = abs(lg - topGrp) < 0.5;
+            bool sameH = abs(le - topElev) <= 0.25;
+            bool bookP = sameLay && abs(topGrp - 1.0) < 0.5;
+            if (topFusable && lfus && sameLay && (sameH || bookP)) continue;
+            vec2 lrad = pxLow - lr.xy;
+            float lmh = min(lh.x, lh.y);
+            float lsw = uMats[j].w;
+            float lsid = floor(lsw + 0.0001);
+            bool ltri = lsid > 0.5 && lsid < 1.5;
+            bool lcir = lsid > 1.5;
+            float lcf = lsw - lsid;
+            float lcov = lcf < 0.25 ? -1.0 : clamp((lcf - 0.5) / 0.499, 0.0, 1.0);
+            float ld;
+            if (lcir) {
+                ld = length(lrad) - lmh;
+            } else if (ltri) {
+                float ltr = min(lh.x / 0.8660254, lh.y / 0.75);
+                ld = sdTri(lrad, ltr);
+            } else {
+                bool lhero = (lm > 2.5 && lm < 3.5) || (lm > 4.5 && lm < 5.5);
+                float lrf = clamp(uParams.x, 0.0, 1.0);
+                float lrCap = min(16.0 * max(uRing.w / 4.0, 0.5), lmh * 0.35);
+                float lcr;
+                if (lcov >= 0.0) lcr = lcov >= 0.98 ? lmh : lcov * lmh;
+                else lcr = lhero ? lmh * 0.5 : min(lrf * lmh, lrCap);
+                ld = sdGlassBox(lrad, lh, lcr);
+            }
+            lowMin = min(lowMin, ld);
+        }
+        float lowMask = (lowMin < 1e8) ? (1.0 - smoothstep(-2.5, 2.5, lowMin)) : 0.0;
+        if (lowMask > 0.003) {
+            vec3 lowSharpW = mix(texture(InSampler, uvLow).rgb, panelBase, inPanel);
+            vec3 lowBlurW = mix(texture(BlurredSampler, uvLow).rgb, panelBase, inPanel);
+            lowSharpW = mix(lowSharpW, lowSharpW * vec3(0.88, 0.96, 1.08) + vec3(0.02, 0.03, 0.05), 0.12 * lowMask);
+            lowBlurW = mix(lowBlurW, lowBlurW * vec3(0.88, 0.96, 1.08) + vec3(0.02, 0.03, 0.05), 0.12 * lowMask);
+            float lowRim = smoothstep(-2.0, -0.75, lowMin) * (1.0 - smoothstep(-0.75, 2.2, lowMin));
+            lowSharpW += lowRim * 0.11 * vec3(1.0, 1.02, 1.06) * lowMask;
+            lowBlurW += lowRim * 0.05 * vec3(1.0, 1.02, 1.06) * lowMask;
+            sharp = mix(sharp, lowSharpW, lowMask * 0.85);
+            body = mix(body, mix(lowBlurW, lowSharpW, 0.65), lowMask * 0.6);
+        }
+    }
     vec3 glass = mix(body, sharp, sharpW);
 
     // Иерархия отклика: интерактивные элементы живее, большие — спокойнее.
@@ -501,19 +996,35 @@ void main() {
     // ACTIVE/selected: gentle cool lift of the SAME material.
     glass = mix(glass, glass * vec3(0.97, 1.0, 1.05) + vec3(0.055, 0.06, 0.07), activeLevel * bestMask);
     // COMPANION (recipe book): прозрачнее — меньше cool-tint, меньше массы.
+    // S1 calm: halved the navy smoke so the backdrop reads through tiles
     glass = mix(glass, glass * vec3(0.88, 0.96, 1.08) + vec3(0.02, 0.03, 0.05),
-        0.28 * (1.0 - 0.35 * compLevel) * bestMask);
+        0.12 * (1.0 - 0.35 * compLevel) * bestMask);
+    // Companion lift, pale glass reads apart from the base panel on dark
+    glass += compLevel * bestMask * vec3(0.035, 0.038, 0.045);
+    vec3 envSingle = texture(BlurredSampler, uv).rgb;
+    float pickupScale = clamp(1.0 - slotLevel * 0.55 - groupLevel * 0.20, 0.25, 1.0);
+    glass += envSingle * uBleed.x * (0.35 + 0.65 * topBias) * bestMask * pickupScale;
     float luma = dot(glass, vec3(0.299, 0.587, 0.114));
     // ...VIBRANCY for dense panels (iOS model): saturate the background,
     // keep luminance - never paint over it.
-    glass = mix(vec3(luma), glass, 1.0 + 0.35 * density);
+    glass = mix(vec3(luma), glass, 1.0 + 0.20 * density + 0.12 * controlLevel);
+    glass += vec3(0.020, 0.021, 0.024) * controlLevel * bestMask;
+    // backdropLuma adaptive — fixes snow/bright vs night (ChatGPT)
+    float backdropLuma = bgL; // sampled centre tap
+    float brightMask = smoothstep(0.65, 0.92, backdropLuma);
+    float darkMask = 1.0 - smoothstep(0.18, 0.42, backdropLuma);
+    // bright bg: tint slightly up, innerShadow up, rim darker, vibrancy down, lumaBoost down
+    // we modulate via multipliers below: luma already, tweak glass
+    glass *= mix(1.0, 0.96, brightMask * 0.35); // lumaBoost down on snow
+    // rim darker on bright bg will be handled via rimTint below with backdrop
+ // ChatGPT 1.12 not 1.35
 
     // ── APPEARANCE (LIGHT / DARK / AUTO): состояния одного материала ──
     // DARK затемняет только тело стекла ВНУТРИ mask; refraction/rim/edge
     // добавляются НИЖЕ и остаются заметными. LIGHT = darkness≈0.
     // uTone.x сглаживается в Java (hysteresis ~0.4 c) — без мигания.
     float darkness = clamp(uTone.x, 0.0, 1.0);
-    glass *= mix(1.0, 0.42, darkness);
+    glass *= mix(1.0, 0.55, clamp(darkness * 0.8, 0.0, 1.0));
 
     // ── CUSTOM TINT (role-scaled): BASE почти нейтральный, CONTROL
     // заметнее, ACTIVE максимум; мир через стекло сохраняет цвет.
@@ -522,7 +1033,7 @@ void main() {
     vec3 tintHue = userTint / max(dot(userTint, vec3(0.333)), 0.06);
     if (tStr > 0.001) {
         float roleW = 0.15 + 0.35 * controlLevel + 0.55 * activeLevel;
-        glass *= mix(vec3(1.0), mix(vec3(1.0), tintHue, 0.6), tStr * roleW);
+        glass *= mix(vec3(1.0), mix(vec3(1.0), tintHue, 0.45), tStr * roleW);
         glass += userTint * tStr * roleW * 0.05;
     }
 
@@ -534,14 +1045,14 @@ void main() {
         float bgL = dot(texture(InSampler, uv).rgb, vec3(0.299, 0.587, 0.114));
         // Тёмный фон → почти невидим (0.08), снег/яркий → до 0.32. Дёшево: 1 sample.
         float dockAlpha = mix(0.06, 0.32, smoothstep(0.45, 0.85, bgL));
-        dockMaskScale = dockAlpha / 0.5; // 0.12..0.64
+        dockMaskScale = 1.0; // dock interior stays sharp, rim carries the shape
         // Outer refractive footprint: innerSdf dilated by outerPad (§3-4, §41)
         float outerPad = max(uDockParams.x, 0.0);
         float outer = 1.0 - smoothstep(-1.0, 1.0, bestD - outerPad);
-        outerMask = clamp(outer - bestMask, 0.0, 1.0) * dockLevel;
+        outerMask = 0.0; // dock footprint off with the blur
         // Outer has much lower density but visible refraction/edge
         if (outerMask > 0.001) {
-            vec2 outerOff = bestDir * outerMask * uDockParams.z * 0.6 / uScreen.xy;
+            vec2 outerOff = edgeN * outerMask * uDockParams.z * 0.6 / uScreen.xy;
             vec3 outerSample = texture(InSampler, uv + outerOff).rgb;
             // Very light fill, almost just refraction
             glass = mix(glass, outerSample, outerMask * 0.22);
@@ -551,23 +1062,82 @@ void main() {
     // Внутри well обычный контур гасится (кроме hover-ячейки) — до
     // вычисления rim-вкладов.
     rimBand *= 1.0 - wellMask * (1.0 - wellHover);
+    if (uPanel.z > 0.5 && inPanel > 0.35) rimBand *= 0.72;
 
-    // Fresnel rim: follows light (outer side bright, opposite dark), intensity by light.
-    float topOnly = rimBand * smoothstep(0.0, 0.6, lightBias) * uLightDir.z * (rimOn ? 1.0 : 0.0);
-    float rimK = clamp(1.0 - density * 0.7 - slotLevel * 0.55 - groupLevel * 0.6
-        + controlLevel * 0.15 + activeLevel * 0.30 - compLevel * 0.15, 0.2, 1.4);
-    vec3 rimTint = vec3(0.95, 0.98, 1.05) * ((0.08 + 0.32 * lightBias) * uParams.z)
-        * (1.0 + hovAmp * 1.6) * rimK * (0.6 + 0.4 * uLightDir.z);
-    // Custom tint подкрашивает edge-ответ (сильнее у контролов/активных).
+    float isCtrl = clamp(controlLevel, 0.0, 1.0);
+    // Static light, iPhone rim does not wander with time
+    vec2 walkLight = lightDir;
+    vec2 rimN = mix(lensN, -lensN, concaveK);
+    // One rim language for buttons and panels, brightest faces the light
+    float facing = max(dot(rimN, walkLight), 0.0);
+    float angular = smoothstep(-0.15, 0.85, facing);
+    angular = pow(angular, 1.5);
+    float intensity = smoothstep(0.10, 0.90, uLightDir.z * max(uLightDir.w, 0.32));
+    float specular = angular * intensity * (rimOn ? 1.0 : 0.0) * mix(0.92, 1.0, isCtrl);
+    specular = max(specular, (rimOn ? 0.05 : 0.0) * max(uLightDir.w, 0.25));
+    // material coeff WOW: HERO catches MORE sun (convex cabochon),
+    // BASE 1.00 GROUP 0.80 SLOT 0.28 ACTIVE 1.35 — buttons brighter than panel.
+    float matSpec = mix(1.00, 1.30, isCtrl);
+    matSpec = mix(matSpec, 0.28, clamp(slotLevel,0.0,1.0));
+    matSpec = mix(matSpec, 0.80, clamp(groupLevel,0.0,1.0));
+    matSpec = mix(matSpec, 0.90, clamp(activeLevel,0.0,1.0));
+    float topOnly = min(rimBand * specular * matSpec * 0.75, 0.6); // Clamp apex spikes, no white pixels
+    float oppFacing = max(dot(rimN, -walkLight), 0.0);
+    float oppMask = smoothstep(0.28, 0.75, oppFacing) * pow(oppFacing, 5.0);
+    float bottomOnly = rimBand * oppMask * uLightDir.z * max(uLightDir.w,0.32) * 0.012 * isCtrl;
+    // inner glow — repeats same thin edge, not full surface
+    float controlSheen = smoothstep(-1.4, -0.7, rimSDF) * (1.0 - smoothstep(-0.7, 0.4, rimSDF)) * smoothstep(0.30, 0.82, edgeN.y) * isCtrl * 0.11;
+    controlSheen *= 1.0 - overGlass * 0.85;
+    glass += controlSheen * vec3(0.020, 0.024, 0.030) * (0.55 + 0.28 * uLightDir.z * max(uLightDir.w,0.32));
+    // Solo stage, light terms only, flat glass stays black
+    if (mode == 13) {
+        fragColor = vec4(vec3(clamp(topOnly + bottomOnly + controlSheen, 0.0, 1.0)), 1.0);
+        return;
+    }
+    float rimK = clamp(1.0 - effDensity * 0.7 - slotLevel * 0.55 - groupLevel * 0.6
+        + controlLevel * 0.15 + activeLevel * 0.30 - compLevel * 0.15, 0.2, 1.35);
+    vec3 rimWhite = vec3(1.0, 1.02, 1.08);
+    // S1 calm: edge takes the light colour, softer white base
+    float sunK = 0.8 * (1.0 - concaveK * 0.65);
+    vec3 rimTint = mix(rimWhite, sunCol, sunK) * (0.42 + 0.85 * specular) * uParams.z;
+    // backdrop adaptive for rim: bright bg -> rim darker, dark bg -> brighter
+    rimTint *= mix(1.0, 0.82, brightMask * 0.45);
+    rimTint *= mix(1.0, 1.18, darkMask * 0.35);
     rimTint = mix(rimTint, rimTint * tintHue,
         tStr * (0.3 + 0.7 * clamp(controlLevel + activeLevel, 0.0, 1.0)));
     glass += topOnly * rimTint;
-    // Edge definition: контур важнее у контролов и активных, тише у слотов
-    // и групп — внешняя рамка окна всегда главнее внутренних линий.
-    float rimAdd = (rimOn ? 0.25 : 0.12) * rimK;
-    glass += rimBand * rimAdd * vec3(0.9, 0.95, 1.0) * bestMask;
-    glass *= 1.0 - rimBand * (1.0 - topBias) * ((rimOn ? 0.10 : 0.0) - hovAmp * 0.06);
-    glass *= 1.0 + hovAmp * 0.10 * bestMask;
+    glass += bottomOnly * rimTint * 0.30;
+    glass += iconRim * rimTint * 0.9;
+    // Backdrop hue gathered at the rim, grey rooms add nothing
+    vec3 edgeCol = texture(BlurredSampler, uv - rimN * 3.0 / uScreen.xy).rgb;
+    vec3 edgeHue = edgeCol - vec3(dot(edgeCol, vec3(0.3333)));
+    glass += rimBand * edgeHue * uBleed.y * bestMask;
+    // Solo stage, bleed terms only, grey rooms stay dark
+    if (mode == 12) {
+        fragColor = vec4(clamp(envSingle * uBleed.x + rimBand * edgeHue * uBleed.y, 0.0, 1.0), 1.0);
+        return;
+    }
+    // base uniform edge — thin, visible even with Refraction=0/Frost=OFF, decoupled
+    float rimAddBase = rimOn ? 0.11 : 0.05;
+    if (uPanel.z > 0.5 && controlLevel > 0.5) rimAddBase *= 0.62;
+    // Higher glass catches more rim light, elevation reads at any material
+    float elevK = topIdx >= 0 ? (0.8 + 0.10 * clamp(topElev, 0.0, 6.0)) : 1.0;
+    float rimAdd = rimAddBase * rimK * elevK * (0.55 + 0.32 * facing * mix(1.0, 0.55, isCtrl) * max(uLightDir.w,0.32));
+    rimAdd *= 1.0 - concaveK * 0.85;
+    glass += rimBand * rimAdd * vec3(1.0, 1.02, 1.06) * mix(1.0, 1.2, isCtrl);
+    glass *= 1.0 - rimBand * (1.0 - topBias) * (rimOn ? 0.06 : 0.0);
+    // Upper glass casts onto lower glass, layers read apart
+    float topShadow = exp(-max(topOut - 1.0, 0.0) * 0.45) * (1.0 - smoothstep(4.0, 6.0, topOut));
+    glass *= 1.0 - topShadow * 0.14 * bestMask * step(0.5, topOut);
+    // Upper layer lifts off the lower glass, height reads as separation
+    float elevLift = topIdx >= 0 ? clamp(topElev, 0.0, 6.0) * 0.012 : 0.0;
+    glass *= 1.0 + elevLift * bestMask;
+    float sepStrength = (1.0 - smoothstep(0.0, 1.4, abs(rimSDF))) * (0.22 + 0.48 * brightMask) * (1.0 - 0.70 * darkMask);
+    sepStrength *= 1.0 - overGlass * 0.85;
+    vec3 sepCol = min(glass * 0.72, vec3(0.40));
+    glass = mix(glass, sepCol, clamp(sepStrength, 0.0, 1.0) * 0.45 * bestMask * (1.0 - concaveK * 0.85));
+    // exposure clamp — never pure white/black (fixes snow dissolve)
+    glass = clamp(glass, vec3(0.04), vec3(0.96));
 
     // Thickness cues (iOS model) for dense HUD panels only — slot cells must
     // NOT stack inner shadows at shared edges (that caused the dark grid).
@@ -575,13 +1145,13 @@ void main() {
         * (1.0 - slotLevel) * bestMask;
     glass *= 1.0 - innerShadow * (0.10 + 0.14 * (1.0 - topBias));
     float topLine = smoothstep(-2.2, -1.2, bestD) * (1.0 - smoothstep(-1.2, -0.2, bestD))
-        * smoothstep(0.55, 0.9, bestDir.y) * density * (1.0 - slotLevel) * bestMask;
-    glass += topLine * vec3(0.05, 0.055, 0.065);
+        * smoothstep(0.55, 0.9, edgeN.y) * density * (1.0 - slotLevel) * bestMask;
+    glass += topLine * vec3(0.025, 0.028, 0.032);
     // Outer contour of the dense HUD bar: thin light outline like the panels'
     // frame — the window border outranks every internal divider.
     float barEdge = smoothstep(-2.4, -1.1, bestD) * (1.0 - smoothstep(-0.6, 1.2, bestD))
         * density * (1.0 - slotLevel) * bestMask;
-    glass += barEdge * vec3(0.075, 0.08, 0.09);
+    glass += barEdge * vec3(0.045, 0.048, 0.055);
 
     // Cell grid (dense panels only): BRIGHT convex lattice + DARK recessed
     // wells — vanilla hotbar structure in glass. Grid origin/pitch come
@@ -606,53 +1176,47 @@ void main() {
     // прозрачным продолжением панели, а не серой плиткой.
     float slotRecessK = slotLevel * bestMask * (0.15 + 0.85 * bestEdge);
     glass = mix(glass, glass * 0.93, clamp(slotRecessK * 0.5, 0.0, 1.0));
+    float slotConc = clamp(slotLevel - wellMask, 0.0, 1.0) * bestMask;
+    glass *= 1.0 - slotConc * smoothstep(0.2, 0.9, edgeN.y) * 0.04;
+    glass += slotConc * smoothstep(0.2, 0.9, -edgeN.y) * vec3(0.030, 0.034, 0.040);
 
     // ─── WELL RECESS PROFILE: колодец в цельном стекле ───
     // Центр ячейки — прозрачное продолжение панели (никакого fill/noise);
     // вся глубина живёт на bevel-кромке шириной ~2px.
     if (wellMask > 0.001) {
-        // TRUE CONCAVE WELL (P1): the centre stays a clear continuation of the
-        // panel (no fill / no noise), all depth lives in the CURVED WALL between
-        // the inner clear hole and the outer flat panel. The wall faces INWARD
-        // (toward the cell centre) — the inverse of a convex tile — so the
-        // captured world dips into a real recess and neighbouring cells read as
-        // ONE continuous glass surface (no drawn divider).
+        // Pit walls face inward toward the flat floor, panel stays flat between cells
         float gsc = max(uRing.w / 4.0, 0.5);
         float rf = clamp(uParams.x, 0.0, 1.0) * 0.9;
-        float wW = 3.0 * gsc;                                   // wall width (fb px)
-        float iD = sdRoundedBox(px - cellC, cellHalf, rf * min(cellHalf.x, cellHalf.y));
-        float oD = sdRoundedBox(px - cellC, cellHalf + wW, rf * min(cellHalf.x + wW, cellHalf.y + wW));
-        float core = smoothstep(0.0, 1.5, -iD);                 // 1 inside clear hole
-        float outer = smoothstep(0.0, 1.5, oD);                 // 1 outside flat panel
-        float wall = (1.0 - core) * (1.0 - outer);              // curved wall band
-        float wf = clamp(iD / wW, 0.0, 1.0);                    // 0 inner lip -> 1 flat
+        float wW = 2.5 * gsc;
+        float innerRW = min(max(rf * min(cellHalf.x, cellHalf.y) + 1.0, 1.2 * gsc), min(cellHalf.x, cellHalf.y));
+        float iD = sdGlassBox(px - cellC, cellHalf, innerRW);
+        float fDepth = -iD;
+        float wp = sin(3.14159 * clamp(fDepth / wW, 0.0, 1.0));
+        float seam = 1.0 - smoothstep(0.0, 2.5, abs(fDepth - wW));
         // Light from top (bottom-origin): the TOP inner lip is shadowed, the
         // BOTTOM inner wall catches light — concave read (opposite of convex).
-        float topLip = 1.0 - smoothstep(0.0, 2.5, (cellC.y + cellHalf.y) - px.y);
+        float topLip = 1.0 - smoothstep(0.0, 1.5, (cellC.y + cellHalf.y) - px.y);
         float botLip = 1.0 - smoothstep(0.0, 2.5, px.y - (cellC.y - cellHalf.y));
-        glass *= 1.0 - wall * (0.06 + 0.12 * topLip) * (1.0 - wf);
-        glass += wall * botLip * vec3(0.022, 0.025, 0.030) * (1.0 - wf);
-        // crisp contact shadow exactly at the clear/wall seam (depth cue)
-        glass *= 1.0 - core * (1.0 - outer) * 0.06;
-        // HOVER: a focused edge response on the selected cell — no bright square.
-        float hovBand = wellHover * wall * (1.0 - wf * 0.5);
+        glass *= 1.0 - wp * (0.04 + 0.05 * topLip);
+        glass += wp * botLip * vec3(0.010, 0.012, 0.014);
+        glass *= 1.0 - seam * 0.05;
+        float lipLine = (1.0 - smoothstep(0.0, 2.0, fDepth)) * botLip;
+        glass += lipLine * vec3(0.045, 0.050, 0.058);
+        float hovBand = wellHover * wp;
         glass += hovBand * vec3(0.060, 0.066, 0.078);
     }
+    glass = mix(glass, sharpWorld, concaveK * 0.30);
 
-    // Procedural glass texture: fine grain (2px cells) + broad smudge patches.
-    float grain = hash12(floor(px / 2.0)) - 0.5;
-    float smudge = hash12(floor(px / 96.0)) - 0.5;
-    glass += grain * 0.018 * bestMask;
-    glass *= 1.0 + smudge * 0.04 * bestMask;
+    // iPhone clean glass
 
     // CONTACT SHADOW (§19): мир чуть темнеет у кромки поверхности — край
     // ощущается как толщина стекла, а не нарисованная линия.
     vec3 worldC = texture(InSampler, uv).rgb;
     float outD = max(bestD, 0.0);
-    float contact = exp(-max(outD - 1.5, 0.0) * 0.22) * smoothstep(0.5, 3.0, outD);
-    worldC *= 1.0 - contact * 0.11 * (1.0 - topBias * 0.5);
+    float contact = exp(-max(outD - 1.5, 0.0) * 0.20) * smoothstep(0.5, 3.0, outD);
+    worldC *= 1.0 - contact * 0.08 * (1.0 - topBias * 0.5) * smoothstep(0.0, 5.0, dNearSlot); // ChatGPT 0.08
     if (uPanel.z > 0.5) {
-        float pdp = sdRoundedBox(px - uPanel.xy, uPanel.zw, uRing.w);
+        float pdp = sdGlassBox(px - uPanel.xy, uPanel.zw, uRing.w);
         float cp = exp(-max(pdp - 1.5, 0.0) * 0.16) * smoothstep(0.5, 3.0, pdp);
         worldC *= 1.0 - cp * 0.09;
     }
@@ -672,7 +1236,7 @@ void main() {
     // window border. Still glides between slots.
     if (uMeta.w >= 0.0 && uMeta.z >= 0.0) {
         vec2 ringC = vec2(uMeta.w, uMeta.z);
-        float d = sdRoundedBox(px - ringC, uRing.xy, uRing.w);
+        float d = sdGlassBox(px - ringC, uRing.xy, uRing.w);
         float ring = 1.0 - smoothstep(uRing.z * 0.4, uRing.z, abs(d));
         float glow = exp(-max(abs(d) - uRing.z, 0.0) * 0.5) * 0.10;
         vec3 ringCol = vec3(0.94, 0.97, 1.05);
