@@ -33,9 +33,7 @@ public class ScreenMixin {
 	 */
 	@Inject(method = "extractRenderState", at = @At("TAIL"))
 	private void liquidum$collectWidgetRects(GuiGraphicsExtractor guiGraphics, int mouseX, int mouseY, float partialTick, CallbackInfo ci) {
-		// L4 FOREGROUND: переигрываем отложенные модели (игрок, книга,
-		// флаг) и progress-иконки печек/точил/столов зачарования в widget-фазе
-		// — они рендерятся ПОВЕРХ glass composite, sharp.
+		// L4: replay deferred models and furnace icons sharp above the glass
 		LiquidGlassRenderer.replayForeground(guiGraphics);
 		LiquidGlassRenderer.replayDeferredSprites(guiGraphics);
 		if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut((Screen)(Object)this)) return;
@@ -62,8 +60,7 @@ public class ScreenMixin {
 	                            List<int[]> rects, StringBuilder dump, int[] clip, int base) {
 		for (var listener : listeners) {
 			if (dump != null) dump.append('\n').append("  ").append(listener.getClass().getName());
-			// Descend into containers (tab bars, grids, tab contents) — many
-			// screens keep their buttons nested, not as direct children.
+			// Descend into containers (tab bars, grids, tab contents) — many screens keep their buttons nested, not as direct children.
 			if (listener instanceof net.minecraft.client.gui.components.events.ContainerEventHandler container) {
 				int[] sub = clip;
 				if (listener instanceof net.minecraft.client.gui.components.AbstractSelectionList<?> list) {
@@ -118,24 +115,14 @@ public class ScreenMixin {
 
 	@Inject(method = "extractBlurredBackground", at = @At("HEAD"), cancellable = true)
 	private void liquidum$suppressVanillaBlurFlag(CallbackInfo ci) {
-		// ALWAYS cancel vanilla's marker here. Container screens have
-		// isInGameUi=false, so vanilla fires this MID-extractBackground —
-		// BEFORE the container panel texture is recorded — which pushed the
-		// panel into the after-blur phase, covering our glass tiles.
-		// The fallback in liquidum$afterBackground sets the marker AFTER the
-		// whole extractBackground (dim + panel included): background goes
-		// below the glass, slots/items above it. Vanilla's actual blur is
-		// cancelled in GameRendererMixin, its backdrop quad in
-		// extractMenuBackground below.
+		// Always cancel vanilla marker: it fires mid-background and buries our tiles
 		if (!LiquidGlassRenderer.isEnabled()) return;
 		ci.cancel();
 	}
 
 	@Inject(method = "extractMenuBackground", at = @At("HEAD"), cancellable = true)
 	private void liquidum$suppressMenuBackdrop(CallbackInfo ci) {
-		// The vanilla menu backdrop quad samples the blur target we never
-		// render (vanilla blur is cancelled), so it would paint a flat stale
-		// color over our tiles. Our glassout IS the backdrop now.
+		// Cancel vanilla backdrop quad, our glassout replaces it
 		if (!LiquidGlassRenderer.isEnabled()) return;
 		ci.cancel();
 	}
@@ -177,10 +164,15 @@ public class ScreenMixin {
 	)
 	private void liquidum$afterBackground(GuiGraphicsExtractor guiGraphics, int mouseX, int mouseY, float partialTick, CallbackInfo ci) {
 		if (!LiquidGlassRenderer.isEnabled()) return;
-		if (!LiquidGlassRenderer.isBlurMarkerSeen()) {
-			guiGraphics.nextStratum();
-			guiGraphics.blurBeforeThisStratum();
-			LiquidGlassRenderer.setBlurMarkerSeen();
+		if (!LiquidGlassRenderer.isBlurMarkerSet()) {
+			try {
+				guiGraphics.nextStratum();
+				guiGraphics.blurBeforeThisStratum();
+			} catch (IllegalStateException foreignMark) {
+				com.liquidum.LiquidumMod.LOGGER.warn("[glass] foreign blur marker adopted: {}", foreignMark.toString());
+			} finally {
+				LiquidGlassRenderer.setBlurMarkerSeen();
+			}
 		}
 		LiquidGlassRenderer.replayHudBar(guiGraphics);
 		if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut((Screen)(Object)this)) return;

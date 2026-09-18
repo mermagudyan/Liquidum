@@ -34,9 +34,7 @@ public class TextStyleMixin {
 		if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(screen)) return;
 		LiquidumTextStyle style = LiquidumTypography.current();
 		if (!LiquidumTypography.needsCustomShadow(style)) return;
-		// В каждом блоке текст как в Recipe Book Search — один цвет/обводка
-		// (иначе Inventory/Crafting #404040 без тени vs Search #707070 с тенью).
-		// Для GLASS/MONOLITH форсим слабую тень даже при shadow==false.
+		// Unify text shadow per block, GLASS/MONOLITH force weak shadow
 		boolean needShadow = shadow || style == LiquidumTextStyle.GLASS || style == LiquidumTextStyle.MONOLITH;
 		if (!needShadow) return;
 		// Унифицируем цвет меток контейнеров (Inventory/Crafting/Chest/Furnace) с Search

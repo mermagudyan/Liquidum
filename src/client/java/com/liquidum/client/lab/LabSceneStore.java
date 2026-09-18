@@ -58,12 +58,12 @@ public class LabSceneStore {
 		public boolean animOpen;
 		public float cornerRadiusFraction = 0.18f;
 		public float refraction = 9f;
+		public float edgeWidth = 1f;
 		public float fresnel = 0.65f;
 		public float sharpnessMix = 0.18f;
 		public float bodyBleed = 0.10f;
 		public float edgeBleed = 0.65f;
 		public float chroma = 0.45f;
-		public float domeHeight = 1f;
 		public float sunSpec = 1f;
 		public float tintStrength;
 		public float tintRed = 0.62f;

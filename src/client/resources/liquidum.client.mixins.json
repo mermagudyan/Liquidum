@@ -5,6 +5,7 @@
 	"client": [
 		"ScreenMixin",
 		"GameRendererMixin",
+		"GuiRendererMixin",
 		"PostChainAccessor",
 		"PostPassAccessor",
 		"AbstractButtonMixin",
@@ -20,7 +21,12 @@
 		"CreativeScreenMixin",
 		"ItemPickerMenuAccessor",
 		"AbstractContainerScreenAccessor",
-		"TextStyleMixin"
+		"TextStyleMixin",
+		"GuiRenderStateAccessor",
+		"OptionInstanceAccessor",
+		"GuiMixin",
+		"WarningScreenInvoker",
+		"ContainerEventHandlerMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

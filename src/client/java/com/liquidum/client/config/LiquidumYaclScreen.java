@@ -43,9 +43,7 @@ public class LiquidumYaclScreen extends Screen {
     }
 
     private void rebuild() {
-        // clear content widgets except tabs/bottom (simple: clear all and re-init tabs)
-        // We keep tabs, so remove only content area widgets by reinitting
-        // Instead just clear and re-add tabs + content
+        // Rebuild clears everything then re-adds tabs and content
         clearWidgets();
         int cx = width / 2;
         int tabX = cx - (TAB_W + CONTENT_W)/2 - 4;
@@ -163,8 +161,7 @@ public class LiquidumYaclScreen extends Screen {
             default -> 0xFF5B7C4A; // grass
         };
         g.fill(0,0,width,height,col);
-        // high-contrast checker + color bars: на плоском фоне рефракцию не видно,
-        // поэтому рисуем частую решётку и цветные полосы — сдвиг виден сразу
+        // high-contrast checker + color bars: на плоском фоне рефракцию не видно, поэтому рисуем частую решётку и цветные полосы — сдвиг виден сразу
         for(int y=0;y<height;y+=20){
             for(int x=0;x<width;x+=20){
                 if(((x+y)/20)%2==0) g.fill(x,y,x+20,y+20,0x22000000);
@@ -179,9 +176,7 @@ public class LiquidumYaclScreen extends Screen {
     }
 
     private void renderGlassPreview(GuiGraphicsExtractor g){
-        // превью — НАСТОЯЩЕЕ стекло: подаём rects в PostChain, фейковых
-        // заливок не рисуем (они ложатся ПОВЕРХ glass и прячут рефракцию).
-        // Фон с решёткой уже лежит ПОД стеклом и преломляется.
+        // Preview uses real glass: rects into PostChain, no fake fills over it
         int cx = width/2 + 20;
         int cy = height/2 - 10;
         LiquidGlassRenderer.submitBasePanel(cx-60, cy-40, 120, 80);

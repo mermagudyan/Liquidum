@@ -1,18 +1,12 @@
 {
     "targets": {
-        "glassout": {
+        "overlay_blur": {
             "persistent": true
         },
-        "uiprev": {
+        "overlay_blur2": {
             "persistent": true
         },
-        "blurred": {
-            "persistent": true
-        },
-        "colorfield": {
-            "persistent": true
-        },
-        "deepfield": {
+        "overlay_out": {
             "persistent": true
         }
     },
@@ -27,7 +21,7 @@
                     "bilinear": true
                 }
             ],
-            "output": "blurred"
+            "output": "overlay_blur"
         },
         {
             "vertex_shader": "minecraft:core/screenquad",
@@ -35,23 +29,11 @@
             "inputs": [
                 {
                     "sampler_name": "In",
-                    "target": "blurred",
+                    "target": "overlay_blur",
                     "bilinear": true
                 }
             ],
-            "output": "colorfield"
-        },
-        {
-            "vertex_shader": "minecraft:core/screenquad",
-            "fragment_shader": "liquidum:post/downsample",
-            "inputs": [
-                {
-                    "sampler_name": "In",
-                    "target": "colorfield",
-                    "bilinear": true
-                }
-            ],
-            "output": "deepfield"
+            "output": "overlay_blur2"
         },
         {
             "vertex_shader": "minecraft:core/screenquad",
@@ -1438,7 +1420,7 @@
                             0.0
                         ]
                     },
-{
+                    {
                         "name": "uCut0",
                         "type": "vec4",
                         "value": [
@@ -1448,7 +1430,7 @@
                             0.0
                         ]
                     },
-{
+                    {
                         "name": "uCut1",
                         "type": "vec4",
                         "value": [
@@ -1458,7 +1440,7 @@
                             0.0
                         ]
                     },
-{
+                    {
                         "name": "uCut2",
                         "type": "vec4",
                         "value": [
@@ -1468,7 +1450,7 @@
                             0.0
                         ]
                     },
-{
+                    {
                         "name": "uCut3",
                         "type": "vec4",
                         "value": [
@@ -1478,7 +1460,7 @@
                             0.0
                         ]
                     },
-{
+                    {
                         "name": "uCut4",
                         "type": "vec4",
                         "value": [
@@ -1488,7 +1470,7 @@
                             0.0
                         ]
                     },
-{
+                    {
                         "name": "uCut5",
                         "type": "vec4",
                         "value": [
@@ -1498,7 +1480,7 @@
                             0.0
                         ]
                     },
-{
+                    {
                         "name": "uCut6",
                         "type": "vec4",
                         "value": [
@@ -1618,26 +1600,26 @@
                 },
                 {
                     "sampler_name": "Prev",
-                    "target": "uiprev",
+                    "target": "overlay_blur2",
                     "bilinear": true
                 },
                 {
                     "sampler_name": "Blurred",
-                    "target": "blurred",
+                    "target": "overlay_blur2",
                     "bilinear": true
                 },
                 {
                     "sampler_name": "ColorField",
-                    "target": "colorfield",
+                    "target": "overlay_blur2",
                     "bilinear": true
                 },
                 {
                     "sampler_name": "DeepField",
-                    "target": "deepfield",
+                    "target": "overlay_blur2",
                     "bilinear": true
                 }
             ],
-            "output": "glassout"
+            "output": "overlay_out"
         },
         {
             "vertex_shader": "minecraft:core/screenquad",
@@ -1645,7 +1627,7 @@
             "inputs": [
                 {
                     "sampler_name": "In",
-                    "target": "glassout",
+                    "target": "overlay_out",
                     "bilinear": true
                 }
             ],

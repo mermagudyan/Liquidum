@@ -4,18 +4,18 @@ import com.liquidum.client.debug.LiquidumDebugState;
 
 // Single main profile, tuned live in the Lab
 public enum LiquidumProfiles {
-    ETALON(9.0f, 0.65f, 0.18f, 10.0f, 12.0f, 0.0f, 0.0f, 0.10f, 0.65f, 0.45f);
+    ETALON(9.0f, 0.65f, 0.18f, 10.0f, 12.0f, 0.0f, 0.10f, 0.65f, 0.45f, 1.0f);
 
     public final float refraction;
     public final float fresnel;
     public final float sharpness;
     public final float frost;
     public final float fusion;
-    public final float dome;
     public final float sun;
     public final float bodyBleed;
     public final float edgeBleed;
     public final float chroma;
+    public final float edgeWidth;
 
     // Profile name follows the Lab language
     public String displayName() {
@@ -29,11 +29,11 @@ public enum LiquidumProfiles {
             && eq(sharpness, LiquidumDebugState.sharpnessMix)
             && eq(frost, LiquidumDebugState.frostRadius)
             && eq(fusion, LiquidumDebugState.fusionRadius)
-            && eq(dome, LiquidumDebugState.domeHeight)
             && eq(sun, LiquidumDebugState.sunSpec)
             && eq(bodyBleed, LiquidumDebugState.bodyBleed)
             && eq(edgeBleed, LiquidumDebugState.edgeBleed)
             && eq(chroma, LiquidumDebugState.chroma)
+            && eq(edgeWidth, LiquidumDebugState.edgeWidth)
             && eq(0.18f, LiquidumDebugState.cornerRadiusFraction)
             && LiquidumDebugState.frost && LiquidumDebugState.rim
             && LiquidumDebugState.aberration && LiquidumDebugState.hover
@@ -59,26 +59,26 @@ public enum LiquidumProfiles {
         return p != null ? p.displayName() : LiquidumLang.tr("Своя");
     }
 
-    LiquidumProfiles(float refraction, float fresnel, float sharpness, float frost, float fusion, float dome, float sun, float bodyBleed, float edgeBleed, float chroma) {
+    LiquidumProfiles(float refraction, float fresnel, float sharpness, float frost, float fusion, float sun, float bodyBleed, float edgeBleed, float chroma, float edgeWidth) {
         this.refraction = refraction;
         this.fresnel = fresnel;
         this.sharpness = sharpness;
         this.frost = frost;
         this.fusion = fusion;
-        this.dome = dome;
         this.sun = sun;
         this.bodyBleed = bodyBleed;
         this.edgeBleed = edgeBleed;
         this.chroma = chroma;
+        this.edgeWidth = edgeWidth;
     }
 
     public void apply() {
         LiquidumDebugState.refraction = refraction;
+        LiquidumDebugState.edgeWidth = edgeWidth;
         LiquidumDebugState.fresnel = fresnel;
         LiquidumDebugState.sharpnessMix = sharpness;
         LiquidumDebugState.frostRadius = frost;
         LiquidumDebugState.fusionRadius = fusion;
-        LiquidumDebugState.domeHeight = dome;
         LiquidumDebugState.sunSpec = sun;
         LiquidumDebugState.bodyBleed = bodyBleed;
         LiquidumDebugState.edgeBleed = edgeBleed;
@@ -104,6 +104,7 @@ public enum LiquidumProfiles {
         try {
             var o = new com.google.gson.JsonObject();
             o.addProperty("refraction", LiquidumDebugState.refraction);
+            o.addProperty("edgeWidth", LiquidumDebugState.edgeWidth);
             o.addProperty("fresnel", LiquidumDebugState.fresnel);
             o.addProperty("sharpnessMix", LiquidumDebugState.sharpnessMix);
             o.addProperty("frostRadius", LiquidumDebugState.frostRadius);
@@ -114,7 +115,6 @@ public enum LiquidumProfiles {
             o.addProperty("aberration", LiquidumDebugState.aberration);
             o.addProperty("fusion", LiquidumDebugState.fusion);
             o.addProperty("hover", LiquidumDebugState.hover);
-            o.addProperty("domeHeight", LiquidumDebugState.domeHeight);
             o.addProperty("sunSpec", LiquidumDebugState.sunSpec);
             o.addProperty("parallax", LiquidumDebugState.parallax);
             o.addProperty("bodyBleed", LiquidumDebugState.bodyBleed);
@@ -136,6 +136,7 @@ public enum LiquidumProfiles {
             if (p == null || !java.nio.file.Files.exists(p)) return;
             var o = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(p)).getAsJsonObject();
             if (o.has("refraction")) LiquidumDebugState.refraction = o.get("refraction").getAsFloat();
+            if (o.has("edgeWidth")) LiquidumDebugState.edgeWidth = o.get("edgeWidth").getAsFloat();
             if (o.has("fresnel")) LiquidumDebugState.fresnel = o.get("fresnel").getAsFloat();
             if (o.has("sharpnessMix")) LiquidumDebugState.sharpnessMix = o.get("sharpnessMix").getAsFloat();
             if (o.has("frostRadius")) LiquidumDebugState.frostRadius = o.get("frostRadius").getAsFloat();
@@ -146,7 +147,6 @@ public enum LiquidumProfiles {
             if (o.has("aberration")) LiquidumDebugState.aberration = o.get("aberration").getAsBoolean();
             if (o.has("fusion")) LiquidumDebugState.fusion = o.get("fusion").getAsBoolean();
             if (o.has("hover")) LiquidumDebugState.hover = o.get("hover").getAsBoolean();
-            if (o.has("domeHeight")) LiquidumDebugState.domeHeight = o.get("domeHeight").getAsFloat();
             if (o.has("sunSpec")) LiquidumDebugState.sunSpec = o.get("sunSpec").getAsFloat();
             if (o.has("parallax")) LiquidumDebugState.parallax = o.get("parallax").getAsBoolean();
             if (o.has("bodyBleed")) LiquidumDebugState.bodyBleed = o.get("bodyBleed").getAsFloat();

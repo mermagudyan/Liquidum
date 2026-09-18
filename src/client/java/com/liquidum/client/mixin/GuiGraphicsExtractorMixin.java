@@ -32,15 +32,12 @@ public class GuiGraphicsExtractorMixin {
 	                                            float u, float v, int width, int height,
 	                                            int texW, int texH, CallbackInfo ci) {
 		if (LiquidGlassRenderer.filterRecipeBookPanel(texture)) {
-			// 2px inset: книга и инвентарь читаются как две РОДСТВЕННЫЕ панели
-			// с намеренным зазором, а не как две случайно наложившиеся
-			// поверхности (стык без скруглённого «вспухания»).
+			// 2px inset: book and inventory read as sibling panels, not a random overlap
 			LiquidGlassRenderer.submitBookPanel(x + 2, y + 2, width - 4, height - 4);
 			ci.cancel();
 			return;
 		}
-		// Матовая подстилка удалена навсегда — ванильную панель 176x166/222
-		// просто гасим, без submitPanelRect (мир просвечивает, остаются только Well-колодцы 18x18).
+		// Матовая подстилка удалена навсегда — ванильную панель 176x166/222 просто гасим, без submitPanelRect (мир просвечивает, остаются только Well-колодцы 18x18).
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
 		if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(screen)) return;
 		if (screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen) {
@@ -50,9 +47,7 @@ public class GuiGraphicsExtractorMixin {
 				return;
 			}
 		}
-		// Маленькие блиты печи/точилки/зачарования/крафта — sharp foreground
-		// (иначе огонь/стрелка ниже стекла, как в печи). Деферим все маленькие
-		// container/* <40px, независимо от имени файла.
+		// Small container blits go sharp foreground, defer all under 40px
 		String path = texture.getPath();
 		if (path.startsWith("textures/gui/container/") && width < 40 && height < 40) {
 			if (LiquidGlassRenderer.deferForeground()) {
@@ -98,10 +93,7 @@ public class GuiGraphicsExtractorMixin {
 	)
 	private void liquidum$filterCreativeTabs(RenderPipeline pipeline, Identifier sprite,
 	                                         int x, int y, int width, int height, CallbackInfo ci) {
-		// Большая матовая панель контейнера через blitSprite (container/background 176×166/222
-		// или generic_54 части) — убираем везде, остаётся полная подстилка
-		// из ContainerMixin (как у Recipe Book 147x166, на всю высоту imageHeight).
-		// Порог 48 для двух-блитового сундука; гейт — containerGlass.
+		// Large container panels cancelled here, backing comes from ContainerMixin
 		String sp = sprite.getPath();
 		if (sp.startsWith("container/") && width > 100 && height > 48) {
 			var screen2 = net.minecraft.client.Minecraft.getInstance().gui.screen();
@@ -112,13 +104,7 @@ public class GuiGraphicsExtractorMixin {
 				return;
 			}
 		}
-		// Матовая подстилка удалена — второй путь (blitSprite) тоже только гасим
-		// Progress icons furnace/grindstone/enchanting etc. — должны быть sharp foreground,
-		// Все маленькие container-спрайты прогрессов/стрелок/иконок кликабельных блоков
-		// (печь, точило, зачарование и т.д.) — должны быть sharp foreground, а не
-		// частью blurred panel (иначе огонь/стрелка ниже стекла). Деферим все
-		// container/* <40px, кроме slot_highlight (который отменяется Wall-ом).
-		// Vanilla square slot cell, our well replaces it
+		// Matte backing only cancelled; small progress sprites defer sharp foreground
 		if (sp.equals("container/slot")) {
 			var screen3 = net.minecraft.client.Minecraft.getInstance().gui.screen();
 			if (com.liquidum.client.compat.LiquidumOptOut.isOptedOut(screen3)) return;
@@ -186,7 +172,7 @@ public class GuiGraphicsExtractorMixin {
 		if (sp.startsWith("recipe_book/tab")) {
 			// Active tab becomes book surface (group 1), idle tabs fuse alone
 			boolean sel = sp.contains("selected");
-			if (sel) LiquidGlassRenderer.submitSpriteTile(x, y, width + LiquidGlassRenderer.tabBridge(x, y, width, height), height, LiquidGlassRenderer.MAT_COMPANION, 0.0f, 1.0f);
+			if (sel) LiquidGlassRenderer.submitSpriteTile(x, y, width + LiquidGlassRenderer.tabBridge(x, y, width, height), height, LiquidGlassRenderer.MAT_COMPANION, 1.0f, 1.0f);
 			else LiquidGlassRenderer.submitSpriteTile(x, y, width, height, mat, 0.0f, 2.0f + (y / 20));
 		} else if (sp.startsWith("widget/text_field") || sp.startsWith("recipe_book/overlay")) {
 			// In-book controls match book height, fuse alone
@@ -309,7 +295,7 @@ public class GuiGraphicsExtractorMixin {
 	@Inject(method = "item(Lnet/minecraft/world/item/ItemStack;III)V", at = @At("HEAD"), cancellable = true)
 	private void liquidum$deferBackgroundItem(net.minecraft.world.item.ItemStack stack, int x, int y, int seed, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
 		if (!LiquidGlassRenderer.deferForeground()) return;
-		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSet()) return;
 		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
 		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
@@ -319,7 +305,7 @@ public class GuiGraphicsExtractorMixin {
 	@Inject(method = "item(Lnet/minecraft/world/item/ItemStack;II)V", at = @At("HEAD"), cancellable = true)
 	private void liquidum$deferBackgroundItemNoSeed(net.minecraft.world.item.ItemStack stack, int x, int y, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
 		if (!LiquidGlassRenderer.deferForeground()) return;
-		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSet()) return;
 		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
 		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
@@ -329,7 +315,7 @@ public class GuiGraphicsExtractorMixin {
 	@Inject(method = "fakeItem(Lnet/minecraft/world/item/ItemStack;III)V", at = @At("HEAD"), cancellable = true)
 	private void liquidum$deferBackgroundFakeSeed(net.minecraft.world.item.ItemStack stack, int x, int y, int seed, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
 		if (!LiquidGlassRenderer.deferForeground()) return;
-		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSet()) return;
 		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
 		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
@@ -339,7 +325,7 @@ public class GuiGraphicsExtractorMixin {
 	@Inject(method = "fakeItem(Lnet/minecraft/world/item/ItemStack;II)V", at = @At("HEAD"), cancellable = true)
 	private void liquidum$deferBackgroundFake(net.minecraft.world.item.ItemStack stack, int x, int y, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
 		if (!LiquidGlassRenderer.deferForeground()) return;
-		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSet()) return;
 		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
 		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
@@ -351,7 +337,7 @@ public class GuiGraphicsExtractorMixin {
 	 *  Откладываем text из background-фазы в foreground (после стекла), как entity/book. */	@Inject(method = "text(Lnet/minecraft/client/gui/Font;Lnet/minecraft/network/chat/Component;IIIZ)V", at = @At("HEAD"), cancellable = true)
 	private void liquidum$deferBackgroundText(net.minecraft.client.gui.Font font, net.minecraft.network.chat.Component text, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
 		if (!LiquidGlassRenderer.deferForeground()) return;
-		if (LiquidGlassRenderer.isBlurMarkerSeen()) return; // уже после blur — sharp и так
+		if (LiquidGlassRenderer.isBlurMarkerSet()) return; // уже после blur — sharp и так
 		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
 		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
@@ -361,7 +347,7 @@ public class GuiGraphicsExtractorMixin {
 	@Inject(method = "text(Lnet/minecraft/client/gui/Font;Ljava/lang/String;IIIZ)V", at = @At("HEAD"), cancellable = true)
 	private void liquidum$deferBackgroundTextStr(net.minecraft.client.gui.Font font, String text, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
 		if (!LiquidGlassRenderer.deferForeground()) return;
-		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSet()) return;
 		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
 		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
@@ -371,7 +357,7 @@ public class GuiGraphicsExtractorMixin {
 	@Inject(method = "text(Lnet/minecraft/client/gui/Font;Lnet/minecraft/util/FormattedCharSequence;IIIZ)V", at = @At("HEAD"), cancellable = true)
 	private void liquidum$deferBackgroundTextSeq(net.minecraft.client.gui.Font font, net.minecraft.util.FormattedCharSequence text, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
 		if (!LiquidGlassRenderer.deferForeground()) return;
-		if (LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (LiquidGlassRenderer.isBlurMarkerSet()) return;
 		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
 		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
@@ -397,7 +383,7 @@ public class GuiGraphicsExtractorMixin {
 
 	private void liquidum$pushTextLayer() {
 		if (!LiquidGlassRenderer.isEnabled()) return;
-		if (!LiquidGlassRenderer.isBlurMarkerSeen()) return;
+		if (!LiquidGlassRenderer.isBlurMarkerSet()) return;
 		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
 		if (screen == null) return;
@@ -408,5 +394,18 @@ public class GuiGraphicsExtractorMixin {
 	/** Caster для передачи extractor в renderer без статического контекста. */
 	private net.minecraft.client.gui.GuiGraphicsExtractor liquidum$extractor() {
 		return (net.minecraft.client.gui.GuiGraphicsExtractor) (Object) this;
+	}
+
+	// Deferred tooltip lands after popup rows but TAIL glass covers both
+	@Inject(
+		method = "tooltip(Lnet/minecraft/client/gui/Font;Ljava/util/List;IILnet/minecraft/client/gui/screens/inventory/tooltip/ClientTooltipPositioner;Lnet/minecraft/resources/Identifier;)V",
+		at = @At("TAIL")
+	)
+	private void liquidum$tooltipAbovePopup(net.minecraft.client.gui.Font font, java.util.List<net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipComponent> lines,
+	                                        int x, int y, net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipPositioner positioner,
+	                                        net.minecraft.resources.Identifier sprite, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.isEnabled() || !LiquidGlassRenderer.hasPopupTiles()) return;
+		var e = liquidum$extractor();
+		LiquidGlassRenderer.submitTooltipCutout(font, lines, x, y, positioner, e.guiWidth(), e.guiHeight());
 	}
 }

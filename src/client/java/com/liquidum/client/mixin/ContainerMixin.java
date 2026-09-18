@@ -67,6 +67,16 @@ public class ContainerMixin {
 	 * 3. Семантика НЕ угадывается геометрией: для известной печки —
 	 *    адаптер с реальными значениями AbstractFurnaceMenu.
 	 */
+	private static int maxSlotY(List<Slot> slots) {
+		int max = Integer.MIN_VALUE;
+		for (Slot s : slots) {
+			if (!s.isActive()) continue;
+			if (s.x < -1000 || s.y < -1000) continue;
+			if (s.y > max) max = s.y;
+		}
+		return max == Integer.MIN_VALUE ? 0 : max;
+	}
+
 	private void liquidum$submitWells(List<Slot> slots) {
 		int n = slots.size();
 		if (n == 0) return;
@@ -151,9 +161,10 @@ public class ContainerMixin {
 				if (slots.get(idxs.get(j)) == hovered) { hover = j; break; }
 			}
 			int bx = (Integer) blk[0], by = (Integer) blk[1], bc = (Integer) blk[2], br = (Integer) blk[3];
-			if (by > 100 && bc == 9 && br == 1) {
-				// Hotbar row inside the screen: one 9x1 well, same look as grids.
-				// Wells center on item pixels (slot.x + 8)
+			// Hotbar row is the lowest 9x1 grid (max slot y), not a magic threshold
+			boolean isHotbarRow = bc == 9 && br == 1 && by >= maxSlotY(slots);
+			if (isHotbarRow) {
+				// Hotbar row inside the screen: one 9x1 well, same look as grids. Wells center on item pixels (slot.x + 8)
 				if (!LiquidGlassRenderer.submitGridWell(
 					leftPos + bx - 1, topPos + by - 1,
 					18, 18, 18, 18, bc, br, hover)) {
@@ -186,10 +197,7 @@ public class ContainerMixin {
 			}
 		}
 
-		// ── Semantic adapter: Furnace (реальные имена 26.x Mojmap) ──
-		// AbstractFurnaceMenu.getLitProgress()  → высота огня (flame spill)
-		// AbstractFurnaceMenu.getBurnProgress() → заполнение ProcessChannel
-		// INGREDIENT_SLOT / FUEL_SLOT / RESULT_SLOT → координаты FX.
+		// Furnace FX from real Mojmap getters: lit/flame spill, burn/channel, slot coords
 		if (menu instanceof net.minecraft.world.inventory.AbstractFurnaceMenu fm) {
 			try {
 				Slot ing = fm.slots.get(net.minecraft.world.inventory.AbstractFurnaceMenu.INGREDIENT_SLOT);
@@ -207,16 +215,12 @@ public class ContainerMixin {
 			}
 		}
 
-		// ── P0: selection/hover centres from REAL slot geometry ──
-		// Drawn as a sharp foreground ring (replaces the cancelled vanilla
-		// highlight) so it stays aligned with the replayed-sharp item, and as
-		// red crosses for the geometry debug overlay.
+		// P0: sharp foreground ring from real slot geometry, aligned with replayed item
 		int hcx = -1, hcy = -1, scx = -1, scy = -1;
 		if (hovered != null) {
 			hcx = leftPos + hovered.x + 8;
 			hcy = topPos + hovered.y + 8;
-			// The "selected" highlight in containers tracks the hovered slot
-			// (the slot under the cursor / being interacted with).
+			// The "selected" highlight in containers tracks the hovered slot (the slot under the cursor / being interacted with).
 			scx = hcx; scy = hcy;
 		}
 		LiquidGlassRenderer.setSelectionHighlight(hcx, hcy, scx, scy);
@@ -247,7 +251,8 @@ public class ContainerMixin {
 	 * PARALLAX layer 2: item icons drift TOWARD the smoothed cursor (the world
 	 * through the glass drifts away — shader side). Opposite motion = depth.
 	 * The call site uses the (stack, x, y, seed) overload — the 4th int passes
-	 * through untouched.
+	 * through untouched. x/y are already absolute gui coords (extractor space),
+	 * no leftPos added (double offset was pushing the gate off-slot).
 	 */
 	@WrapOperation(
 		method = "extractSlot",
@@ -262,7 +267,7 @@ public class ContainerMixin {
 		Operation<Void> original) {
 		com.liquidum.client.shader.LiquidumLayers.beginItems(instance);
 		int fy = y;
-		float[] off = LiquidGlassRenderer.itemParallax(leftPos + x, topPos + y);
+		float[] off = LiquidGlassRenderer.itemParallax(x, y);
 		if (off == null) {
 			if (fy == y) {
 				original.call(instance, stack, x, y, seed);
@@ -293,7 +298,7 @@ public class ContainerMixin {
 		int x, int y, String text,
 		Operation<Void> original) {
 		com.liquidum.client.shader.LiquidumLayers.beginText(instance);
-		float[] off = LiquidGlassRenderer.itemParallax(leftPos + x, topPos + y);
+		float[] off = LiquidGlassRenderer.itemParallax(x, y);
 		if (off == null) {
 			original.call(instance, font, stack, x, y, text);
 			return;

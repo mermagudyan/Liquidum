@@ -6,7 +6,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
-import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.client.renderer.RenderPipelines;
@@ -77,6 +76,14 @@ public class LiquidumDebugScreen extends Screen {
 		addToggleRow(x, y, w, "AnimOpen", () -> LiquidumDebugState.animOpen, v -> LiquidumDebugState.animOpen = v); y += ROW_H;
 		addToggleRow(x, y, w, "CrashOnError", () -> LiquidumDebugState.crashOnError, v -> LiquidumDebugState.crashOnError = v); y += ROW_H;
 		addToggleRow(x, y, w, "GeometryDebug", () -> LiquidumDebugState.debugGeometry, v -> LiquidumDebugState.debugGeometry = v); y += ROW_H;
+		addToggleRow(x, y, w, "Probe", () -> LiquidumDebugState.probeShow, v -> {
+			LiquidumDebugState.probeShow = v;
+			if (v) {
+				LiquidumDebugState.probeX = width / 2f;
+				LiquidumDebugState.probeY = height / 2f;
+			}
+		}); y += ROW_H;
+		addNumericRow(x, y, w, "ProbeSize", () -> LiquidumDebugState.probeDiameter, v -> LiquidumDebugState.probeDiameter = v, 32f, 400f, 8f, 120f); y += ROW_H;
 
 		addNumericRow(x, y, w, "CornerRadius", () -> LiquidumDebugState.cornerRadiusFraction, v -> LiquidumDebugState.cornerRadiusFraction = v, 0f, 1f, 0.05f, 0.28f); y += ROW_H;
 		addNumericRow(x, y, w, "Refraction", () -> LiquidumDebugState.refraction, v -> LiquidumDebugState.refraction = v, 0f, 200f, 5f, 20f); y += ROW_H;
@@ -84,7 +91,6 @@ public class LiquidumDebugScreen extends Screen {
 		addNumericRow(x, y, w, "SharpnessMix", () -> LiquidumDebugState.sharpnessMix, v -> LiquidumDebugState.sharpnessMix = v, 0f, 1f, 0.05f, 0.14f); y += ROW_H;
 		addNumericRow(x, y, w, "FrostRadius(blur)", () -> LiquidumDebugState.frostRadius, v -> LiquidumDebugState.frostRadius = v, 0f, 30f, 1f, 7f); y += ROW_H;
 		addNumericRow(x, y, w, "FuseRadius(px)", () -> LiquidumDebugState.fusionRadius, v -> LiquidumDebugState.fusionRadius = v, 0f, 60f, 2f, 12f); y += ROW_H;
-		addNumericRow(x, y, w, "DomeH(off)", () -> LiquidumDebugState.domeHeight, v -> LiquidumDebugState.domeHeight = v, 0f, 1.5f, 0.1f, 0.0f); y += ROW_H;
 		addNumericRow(x, y, w, "SunSpec(off)", () -> LiquidumDebugState.sunSpec, v -> LiquidumDebugState.sunSpec = v, 0f, 2f, 0.1f, 0.0f); y += ROW_H;
 		addNumericRow(x, y, w, "AnimMs", () -> LiquidumDebugState.animMillis, v -> LiquidumDebugState.animMillis = v, 50f, 1000f, 10f, 220f); y += ROW_H;
 

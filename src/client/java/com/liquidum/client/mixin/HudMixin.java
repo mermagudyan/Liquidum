@@ -30,14 +30,16 @@ public class HudMixin {
 	@Inject(method = "extractRenderState", at = @At("HEAD"))
 	private void liquidum$hudBlurMarker(GuiGraphicsExtractor guiGraphics, DeltaTracker deltaTracker, CallbackInfo ci) {
 		if (!LiquidGlassRenderer.isEnabled()) return;
-		// When a screen is open the SCREEN must own the marker (its background
-		// has to land in the before-blur phase, under the glass). If the HUD
-		// claimed it first, the container panel would be drawn after the
-		// boundary вЂ” over our glass tiles (inventory looked fully vanilla).
+		// Open screen owns the blur marker so its background lands under the glass
 		if (net.minecraft.client.Minecraft.getInstance().gui.screen() != null) return;
-		if (!LiquidGlassRenderer.isBlurMarkerSeen()) {
-			guiGraphics.blurBeforeThisStratum();
-			LiquidGlassRenderer.setBlurMarkerSeen();
+		if (!LiquidGlassRenderer.isBlurMarkerSet()) {
+			try {
+				guiGraphics.blurBeforeThisStratum();
+			} catch (IllegalStateException foreignMark) {
+				com.liquidum.LiquidumMod.LOGGER.warn("[glass] foreign blur marker adopted: {}", foreignMark.toString());
+			} finally {
+				LiquidGlassRenderer.setBlurMarkerSeen();
+			}
 		}
 	}
 
@@ -85,8 +87,7 @@ public class HudMixin {
 		LiquidGlassRenderer.submitLuminanceDock(guiGraphics.guiWidth(), guiGraphics.guiHeight());
 	}
 
-	// Debug watermark: a stuck solo/mask view once faked a fullscreen blur
-	// bug, never again вЂ” the active view name stays on screen until reset
+	// Debug watermark: a stuck solo/mask view once faked a fullscreen blur bug, never again вЂ” the active view name stays on screen until reset
 	@Inject(method = "extractRenderState", at = @At("TAIL"))
 	private void liquidum$soloWatermark(GuiGraphicsExtractor guiGraphics, DeltaTracker deltaTracker, CallbackInfo ci) {
 		if (!LiquidGlassRenderer.isEnabled()) return;
@@ -121,9 +122,9 @@ public class HudMixin {
 			return;
 		}
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
-		// Defer HUD items on any open screen, replay clips them under buttons
+		// Defer HUD items on open screens, options keep them under the glass
 		if (screen != null && LiquidGlassRenderer.isEnabled() && !com.liquidum.client.compat.LiquidumOptOut.isOptedOut(screen)
-			&& LiquidGlassRenderer.shouldRenderHotbarEdge()) {
+			&& LiquidGlassRenderer.shouldRenderHotbarEdge() && !LiquidGlassRenderer.keepHudItemsBackground()) {
 			LiquidGlassRenderer.deferHudItem(entity, stack, x, y, seed);
 			return;
 		}
@@ -150,9 +151,9 @@ public class HudMixin {
 			return;
 		}
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
-		// Same for counts and durability, they obey button elevation too
+		// Same for counts and durability, options keep them under the glass too
 		if (screen != null && LiquidGlassRenderer.isEnabled() && !com.liquidum.client.compat.LiquidumOptOut.isOptedOut(screen)
-			&& LiquidGlassRenderer.shouldRenderHotbarEdge()) {
+			&& LiquidGlassRenderer.shouldRenderHotbarEdge() && !LiquidGlassRenderer.keepHudItemsBackground()) {
 			LiquidGlassRenderer.deferHudDecor(font, stack, x, y);
 			return;
 		}

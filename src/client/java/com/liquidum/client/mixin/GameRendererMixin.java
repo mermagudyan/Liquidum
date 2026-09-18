@@ -1,7 +1,6 @@
 package com.liquidum.client.mixin;
 
 import com.liquidum.client.shader.LiquidGlassRenderer;
-import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.GameRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -28,11 +27,5 @@ public class GameRendererMixin {
 		if (!LiquidGlassRenderer.isEnabled()) return;
 		ci.cancel();
 		LiquidGlassRenderer.applyOncePerFrame();
-	}
-
-	/** Frame boundary: re-arm the once-per-frame guard. */
-	@Inject(method = "render(Lnet/minecraft/client/DeltaTracker;Z)V", at = @At("TAIL"))
-	private void liquidum$onFrameEnd(DeltaTracker deltaTracker, boolean renderLevel, CallbackInfo ci) {
-		LiquidGlassRenderer.resetFrame();
 	}
 }

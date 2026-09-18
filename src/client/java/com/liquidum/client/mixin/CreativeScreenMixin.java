@@ -36,6 +36,7 @@ public class CreativeScreenMixin {
 	}
 
 	private float liquidum$scrollTarget = Float.NaN;
+	private long liquidum$scrollNanos = 0L;
 
 	private net.minecraft.world.inventory.AbstractContainerMenu liquidum$menu() {
 		return ((AbstractContainerScreenAccessor) (Object) this).liquidum$getMenu();
@@ -70,8 +71,7 @@ public class CreativeScreenMixin {
 			liquidum$scrollTarget = scrollOffs;
 			return;
 		}
-		// Scrollbar DRAG: vanilla writes scrollOffs directly — follow it 1:1,
-		// no animation (animating against the drag = tug-of-war jerkiness).
+		// Scrollbar DRAG: vanilla writes scrollOffs directly — follow it 1:1, no animation (animating against the drag = tug-of-war jerkiness).
 		if (scrolling) {
 			liquidum$scrollTarget = scrollOffs;
 			return;
@@ -80,7 +80,10 @@ public class CreativeScreenMixin {
 		if (Math.abs(scrollOffs - liquidum$scrollTarget) > 0.5f) {
 			liquidum$scrollTarget = scrollOffs;
 		}
-		float dt = 1.0f / 60.0f;
+		long now = System.nanoTime();
+		float dt = liquidum$scrollNanos == 0L ? 1f / 60f
+			: Math.min((now - liquidum$scrollNanos) / 1e9f, 0.1f);
+		liquidum$scrollNanos = now;
 		float k = 1f - (float) Math.exp(-8.0 * dt);
 		scrollOffs += (liquidum$scrollTarget - scrollOffs) * k;
 		if (Math.abs(liquidum$scrollTarget - scrollOffs) < 0.0005f) scrollOffs = liquidum$scrollTarget;
@@ -90,6 +93,7 @@ public class CreativeScreenMixin {
 	@Inject(method = "selectTab", at = @At("HEAD"))
 	private void liquidum$onSelectTab(CreativeModeTab tab, CallbackInfo ci) {
 		liquidum$scrollTarget = Float.NaN;
+		liquidum$scrollNanos = 0L;
 		TabHistory.Transition t = TabHistory.transitionTo(tab);
 		if (t != TabHistory.Transition.NONE && LiquidGlassRenderer.isTabTransitionEnabled()) {
 			LiquidGlassRenderer.startTabTransition();

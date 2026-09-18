@@ -3,6 +3,7 @@ package com.liquidum.client.lab;
 import com.liquidum.client.LiquidumCore;
 import com.liquidum.client.compat.LiquidumOptOut;
 import com.liquidum.client.config.LiquidumLang;
+import com.liquidum.client.config.LiquidumLang;
 import com.liquidum.client.config.LiquidumProfiles;
 import com.liquidum.client.debug.LiquidumDebugState;
 import com.liquidum.client.shader.LiquidGlassRenderer;
@@ -458,7 +459,7 @@ public class LiquidumLabScreen extends Screen {
 
 	private int buildDebugTab(int lx, int y, int lw) {
 		var channels = new java.util.ArrayList<String>();
-		for (int i = 0; i < 12; i++) {
+		for (int i = 0; i < 15; i++) {
 			channels.add(LiquidumDebugState.soloNameOf(i));
 		}
 		y = addDropRow(lx, y, lw, tr("Вид"), channels, LiquidumDebugState.soloStage, idx -> {
@@ -486,11 +487,28 @@ public class LiquidumLabScreen extends Screen {
 		y += ROW_H;
 		y = addToggleRow(lx, y, lw, tr("Падение при ошибке"), () -> LiquidumDebugState.crashOnError, v -> LiquidumDebugState.crashOnError = v);
 		y = addToggleRow(lx, y, lw, tr("Геометрия слотов"), () -> LiquidumDebugState.debugGeometry, v -> LiquidumDebugState.debugGeometry = v);
+		y = addToggleRow(lx, y, lw, tr("Зонд"), () -> LiquidumDebugState.probeShow, v -> {
+			LiquidumDebugState.probeShow = v;
+			if (v) {
+				LiquidumDebugState.probeX = width / 2f;
+				LiquidumDebugState.probeY = height / 2f;
+			}
+		});
+		y = addNumericRow(lx, y, lw, tr("Размер зонда"), () -> LiquidumDebugState.probeDiameter, v -> LiquidumDebugState.probeDiameter = v, 32f, 400f, 8f, 120f);
 		y = addSectionRow(lx, y, lw, tr("Эксперимент"));
-		y = addToggleRow(lx, y, lw, tr("Слипание плиток"), () -> LiquidumDebugState.fusion, v -> LiquidumDebugState.fusion = v);
+		y = addToggleRow(lx, y, lw, tr("Слипание плиток"), () -> LiquidumDebugState.fusion, v -> {
+			LiquidumDebugState.fusion = v;
+			if (v) LiquidumDebugState.customSettings = false;
+			init();
+		});
+		y = addToggleRow(lx, y, lw, tr("Ванильные настройки"), () -> LiquidumDebugState.customSettings, v -> {
+			LiquidumDebugState.customSettings = v;
+			if (v) LiquidumDebugState.fusion = false;
+			init();
+		});
 		y = addNumericRow(lx, y, lw, tr("Радиус слипания"), () -> LiquidumDebugState.fusionRadius, v -> LiquidumDebugState.fusionRadius = v, 0f, 30f, 1f, 12f, () -> LiquidumDebugState.fusion);
-		y = addNumericRow(lx, y, lw, tr("Купол (игнор)"), () -> LiquidumDebugState.domeHeight, v -> LiquidumDebugState.domeHeight = v, 0f, 1.5f, 0.1f, 1f);
 		y = addNumericRow(lx, y, lw, tr("Солнечный блик"), () -> LiquidumDebugState.sunSpec, v -> LiquidumDebugState.sunSpec = v, 0f, 2f, 0.1f, 1f);
+		y = addToggleRow(lx, y, lw, tr("Анимация открытия"), () -> LiquidumDebugState.animOpen, v -> LiquidumDebugState.animOpen = v);
 		var cfg = LiquidumCore.getConfig();
 		y = addToggleRow(lx, y, lw, tr("Ореол: сердца"), () -> cfg.healthGlass, v -> {
 			cfg.healthGlass = v;
@@ -532,7 +550,6 @@ public class LiquidumLabScreen extends Screen {
 		y = addSectionRow(lx, y, lw, tr("Поведение"));
 		y = addToggleRow(lx, y, lw, tr("Блик за курсором"), () -> LiquidumDebugState.hover, v -> LiquidumDebugState.hover = v);
 		y = addToggleRow(lx, y, lw, tr("Параллакс"), () -> LiquidumDebugState.parallax, v -> LiquidumDebugState.parallax = v);
-		y = addToggleRow(lx, y, lw, tr("Анимация открытия"), () -> LiquidumDebugState.animOpen, v -> LiquidumDebugState.animOpen = v);
 		y = addSectionRow(lx, y, lw, tr("Свет"));
 		addRenderableWidget(Button.builder(Component.literal(tr("Источник") + ": " + (LiquidumDebugState.lightManual ? tr("ручной") : tr("из мира"))), b -> {
 			LiquidumDebugState.lightManual = !LiquidumDebugState.lightManual;
@@ -556,6 +573,7 @@ public class LiquidumLabScreen extends Screen {
 	private int buildMatTab(int lx, int y, int lw) {
 		y = addNumericRow(lx, y, lw, tr("Скругление"), () -> LiquidumDebugState.cornerRadiusFraction, v -> LiquidumDebugState.cornerRadiusFraction = v, 0f, 1f, 0.05f, 0.18f);
 		y = addNumericRow(lx, y, lw, tr("Преломление"), () -> LiquidumDebugState.refraction, v -> LiquidumDebugState.refraction = v, 0f, 60f, 1f, 9f);
+		y = addNumericRow(lx, y, lw, tr("Ширина края"), () -> LiquidumDebugState.edgeWidth, v -> LiquidumDebugState.edgeWidth = v, 0.25f, 2f, 0.05f, 1f);
 		y = addNumericRow(lx, y, lw, tr("Кромка"), () -> LiquidumDebugState.fresnel, v -> LiquidumDebugState.fresnel = v, 0f, 2f, 0.05f, 0.65f, () -> LiquidumDebugState.rim);
 		y = addNumericRow(lx, y, lw, tr("Чёткость"), () -> LiquidumDebugState.sharpnessMix, v -> LiquidumDebugState.sharpnessMix = v, 0f, 1f, 0.02f, 0.18f);
 		y = addNumericRow(lx, y, lw, tr("Радиус мата"), () -> LiquidumDebugState.frostRadius, v -> LiquidumDebugState.frostRadius = v, 0f, 20f, 0.5f, 10.0f, () -> LiquidumDebugState.frost);
@@ -617,12 +635,12 @@ public class LiquidumLabScreen extends Screen {
 		s.animOpen = LiquidumDebugState.animOpen;
 		s.cornerRadiusFraction = LiquidumDebugState.cornerRadiusFraction;
 		s.refraction = LiquidumDebugState.refraction;
+		s.edgeWidth = LiquidumDebugState.edgeWidth;
 		s.fresnel = LiquidumDebugState.fresnel;
 		s.sharpnessMix = LiquidumDebugState.sharpnessMix;
 		s.bodyBleed = LiquidumDebugState.bodyBleed;
 		s.edgeBleed = LiquidumDebugState.edgeBleed;
 		s.chroma = LiquidumDebugState.chroma;
-		s.domeHeight = LiquidumDebugState.domeHeight;
 		s.sunSpec = LiquidumDebugState.sunSpec;
 		var cfg = LiquidumCore.getConfig();
 		s.tintStrength = cfg.tintStrength;
@@ -650,12 +668,12 @@ public class LiquidumLabScreen extends Screen {
 		LiquidumDebugState.animOpen = s.animOpen;
 		LiquidumDebugState.cornerRadiusFraction = s.cornerRadiusFraction;
 		LiquidumDebugState.refraction = s.refraction;
+		LiquidumDebugState.edgeWidth = s.edgeWidth;
 		LiquidumDebugState.fresnel = s.fresnel;
 		LiquidumDebugState.sharpnessMix = s.sharpnessMix;
 		LiquidumDebugState.bodyBleed = s.bodyBleed;
 		LiquidumDebugState.edgeBleed = s.edgeBleed;
 		LiquidumDebugState.chroma = s.chroma;
-		LiquidumDebugState.domeHeight = s.domeHeight;
 		LiquidumDebugState.sunSpec = s.sunSpec;
 		var cfg = LiquidumCore.getConfig();
 		cfg.tintStrength = s.tintStrength;
@@ -705,30 +723,11 @@ public class LiquidumLabScreen extends Screen {
 			cfg.save();
 			LiquidGlassRenderer.applyConfig(cfg);
 		});
-		addRenderableWidget(Button.builder(Component.literal(tr("Язык") + ": " + langModeName()), b -> {
-			var c = LiquidumCore.getConfig();
-			c.language = switch (c.language == null ? "auto" : c.language) {
-				case "ru" -> "en";
-				case "en" -> "auto";
-				default -> "ru";
-			};
-			c.save();
-			b.setMessage(Component.literal(tr("Язык") + ": " + langModeName()));
-			init();
+		addRenderableWidget(Button.builder(Component.literal(tr("Язык") + ": " + LiquidumLang.langCode()), b -> {
+			LiquidumLang.openLanguageMenu(this);
 		}).bounds(lx, y, lw, 20).build());
 		y += ROW_H;
 		return y;
-	}
-
-	// Language override label, auto follows the MC client language
-	private static String langModeName() {
-		String m = LiquidumCore.getConfig().language;
-		if (m == null) m = "auto";
-		return switch (m) {
-			case "ru" -> tr("Русский");
-			case "en" -> "English";
-			default -> tr("Авто");
-		};
 	}
 
 	private void buildBottomBar() {
@@ -1774,7 +1773,7 @@ public class LiquidumLabScreen extends Screen {
 			hint = tr("Высота — свет, тень и слияние стекла");
 		}
 		if (LiquidumDebugState.soloStage != 0) {
-			hint += tr(" · Вид: ") + LiquidumDebugState.soloName();
+			hint += tr(" · Вид: ") + LiquidumDebugState.soloName() + " — " + LiquidumDebugState.soloDescOf(LiquidumDebugState.soloStage);
 		}
 		g.centeredText(font, hint, contentX + LabLayout.LEFT_W / 2, 34, 0xFFDDDDDD);
 	}
@@ -1924,8 +1923,7 @@ public class LiquidumLabScreen extends Screen {
 			AbstractWidget w = contentWidgets.get(i);
 			int liveY = contentDY.get(i) - (int) scrollPx;
 			w.setY(liveY);
-			// Engine etches recorded button scissors as-is and demands full
-			// containment, so cull by live position unless fully on screen
+			// Engine etches recorded button scissors as-is and demands full containment, so cull by live position unless fully on screen
 			boolean inside = liveY >= 0 && liveY + w.getHeight() <= height;
 			w.visible = inside;
 			if (!inside) {

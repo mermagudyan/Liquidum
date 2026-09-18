@@ -25,14 +25,25 @@ public class LiquidumDebugState {
 	/** Frost gaussian radius in pixels (= blur radius fed to blur25). iPhone 6-7, не 10 — читаемость. */
 	public static float frostRadius = 10.0f;
 
-	/** GEOMETRY DEBUG (P0): draw red crosses on vanilla Slot centres and green
-	 *  crosses on GridWell shader cell centres to verify the two coordinate
-	 *  systems coincide. */
+	// Draw red crosses on vanilla Slot centres and green crosses on GridWell shader cell centres to verify the two coordinate systems coincide.
 	public static boolean debugGeometry = false;
+
+	// Floating glass probe: one circle on every screen, dragged by cursor
+	public static boolean probeShow = false;
+	public static float probeX = 0f;
+	public static float probeY = 0f;
+	public static float probeDiameter = 120f;
+	// Probe drag state owned by the container dispatch mixin
+	public static boolean probeDrag = false;
+	public static float probeGrabDX = 0f;
+	public static float probeGrabDY = 0f;
 
 	/** SDF fusion of neighbouring tiles (metaball merge); radius in px, 0/off = hard union. iPhone 12, не 18 — blob умеренный. */
 	public static boolean fusion = true;
 	public static float fusionRadius = 12.0f;
+
+	// Custom user settings gate, mutually exclusive with fusion
+	public static boolean customSettings = false;
 
 	/** Open animation: tiles grow out of their centres with a slight rise (easeOutCubic). */
 	public static boolean animOpen = false; // P: анимации появления кнопок off — не мозолит глаза
@@ -41,14 +52,9 @@ public class LiquidumDebugState {
 	/** Material params (mirrored from glass.fsh; all editable live from the Lab). iPhone: тоньше, мягче, без мыла. */
 	public static float cornerRadiusFraction = 0.18f;
 	public static float refraction = 9.0f;
+	public static float edgeWidth = 1.0f;
 	public static float fresnel = 0.65f;
 	public static float sharpnessMix = 0.18f;
-
-	/** WOW VOLUME DOME: master scale of the plano-convex cabochon (0 = flat
-	 *  edge-only lens, 1 = full dome, up to 1.5). Written to uAnim.z. */
-	public static float domeHeight = 1.0f;
-	/** WOW SUN: master gain of the sun Blinn-Phong + caustic (0..2).
-	 *  Written to uSun.a and uWellMeta.w. */
 	public static float sunSpec = 1.0f;
 
 	// Solo isolation stage for Lab rework, 0 = full composite
@@ -97,11 +103,11 @@ public class LiquidumDebugState {
 
 	public static void dump() {
 		LiquidumMod.LOGGER.info(
-			"[lab] STATE: mode={} hover={} aberration={} rim={} frost={} frostRadius={} fusion={} fusionRadius={} animOpen={} animMillis={} crashOnError={}",
-			modeName(), hover, aberration, rim, frost, frostRadius, fusion, fusionRadius, animOpen, animMillis, crashOnError);
+			"[lab] STATE: mode={} hover={} aberration={} rim={} frost={} frostRadius={} fusion={} fusionRadius={} custom={} animOpen={} animMillis={} crashOnError={}",
+			modeName(), hover, aberration, rim, frost, frostRadius, fusion, fusionRadius, customSettings, animOpen, animMillis, crashOnError);
 		LiquidumMod.LOGGER.info(
-			"[lab] MATERIAL: cornerRadius={} refraction={} fresnel={} sharpnessMix={} dome={} sunSpec={} solo={} parallax={} bleed={}/{}/{} light={}/{}/{}",
-			cornerRadiusFraction, refraction, fresnel, sharpnessMix, domeHeight, sunSpec, soloStage, parallax, bodyBleed, edgeBleed, chroma, lightManual, lightAngle, lightLevel);
+			"[lab] MATERIAL: cornerRadius={} refraction={} edgeWidth={} fresnel={} sharpnessMix={} sunSpec={} solo={} parallax={} bleed={}/{}/{} light={}/{}/{} probe={}@{},{}x{}",
+			cornerRadiusFraction, refraction, edgeWidth, fresnel, sharpnessMix, sunSpec, soloStage, parallax, bodyBleed, edgeBleed, chroma, lightManual, lightAngle, lightLevel, probeShow, (int) probeX, (int) probeY, (int) probeDiameter);
 	}
 
 	// Solo stage names for the Lab cycler, index matches soloStage
@@ -122,7 +128,30 @@ public class LiquidumDebugState {
 			case 9 -> "HIGHLIGHT";
 			case 10 -> "ELEV";
 			case 11 -> "FUSION";
+			case 12 -> "REFR SOURCE";
+			case 13 -> "TOPMOST";
+			case 14 -> "TAILSRC";
 			default -> "FULL";
+		};
+	}
+
+	public static String soloDescOf(int stage) {
+		return switch (stage) {
+			case 1 -> "raw chain input, no glass";
+			case 2 -> "tile coverage as cyan";
+			case 3 -> "fused distance field as gray";
+			case 4 -> "lens gate as white";
+			case 5 -> "frosted body sample alone";
+			case 6 -> "SDF refraction direction as color";
+			case 7 -> "lens displacement as color";
+			case 8 -> "backdrop color pickup alone";
+			case 9 -> "rim light plus caustic on black";
+			case 10 -> "covering tile height as gray";
+			case 11 -> "fuse groups as color, joints lighten";
+			case 12 -> "refracted sample before frost";
+			case 13 -> "winning tile material as color";
+			case 14 -> "raw overlay input for popup glass";
+			default -> "final glass over world";
 		};
 	}
 }

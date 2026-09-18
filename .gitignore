@@ -42,6 +42,6 @@ replay_*.log
 docs/
 mappings/
 libs/
-assets/
+/assets/
 .log/
 net/

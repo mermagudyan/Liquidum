@@ -23,6 +23,8 @@ public final class ButtonInteractionHandler {
     private static AbstractWidget pressedWidget = null;
     private static boolean pressedWasHovered = false;
     private static long pressedNanos = 0L;
+    // Smoothed 0..1 press level mirrored to the glass shader dent (uLayer.w)
+    private static float pressLevel = 0f;
 
     private static final class State {
         final SpringPhysics scale = new SpringPhysics(1.0f);
@@ -67,20 +69,22 @@ public final class ButtonInteractionHandler {
         return s != null ? s.hoverCurrent : 0f;
     }
 
+    public static float pressLevel() {
+        return pressLevel;
+    }
+
     /** Called from AbstractButtonMixin on mouseClicked HEAD (cancellable). */
     public static boolean onButtonMouseClicked(AbstractButton btn, net.minecraft.client.input.MouseButtonEvent event, boolean bl) {
         if (!LiquidumCore.getConfig().enabled || !LiquidumCore.getConfig().buttonsGlass) return false;
         if (isRecipeControl(btn)) return false;
-        // §D: книга рецептов открывается на 2-й клик если iOS-defer — у неё свой
-        // toggleVisibility который ждёт immediate onPress. Bypass iOS для неё.
+        // §D: книга рецептов открывается на 2-й клик если iOS-defer — у неё свой toggleVisibility который ждёт immediate onPress. Bypass iOS для неё.
         try {
             if (com.liquidum.client.shader.LiquidGlassRenderer.isRecipeBookButton(btn)) return false;
         } catch (Exception ignored) {}
         // Only iOS-style for primary button (left) — right clicks pass through
         try {
             var info = event.buttonInfo();
-            // isValidClickButton check — only left (button 0) in vanilla; keep same gate
-            // If not valid, let vanilla handle
+            // isValidClickButton check — only left (button 0) in vanilla; keep same gate If not valid, let vanilla handle
             if (!btn.isActive() || !btn.visible) return false;
         } catch (Exception ignored) {}
         double mx = event.x();
@@ -149,6 +153,13 @@ public final class ButtonInteractionHandler {
         // Reduced motion: no spring overshoot
         boolean reduced = LiquidumCore.getConfig().reducedMotion;
         float dt = 1f/60f;
+        if (pressedWidget != null) {
+            State ps = STATES.get(pressedWidget);
+            if (ps == null || !ps.isPressed) pressedWidget = null;
+        }
+        float pressTarget = (pressedWidget != null && !reduced) ? 1f : 0f;
+        pressLevel += (pressTarget - pressLevel) * (1f - (float) Math.exp(-14 * dt));
+        if (pressLevel < 0.001f && pressTarget <= 0f) pressLevel = 0f;
         var iter = new java.util.ArrayList<>(STATES.entrySet());
         for (var e : iter) {
             AbstractWidget w = e.getKey();
@@ -188,5 +199,6 @@ public final class ButtonInteractionHandler {
     public static void clear() {
         STATES.clear();
         pressedWidget = null;
+        pressLevel = 0f;
     }
 }

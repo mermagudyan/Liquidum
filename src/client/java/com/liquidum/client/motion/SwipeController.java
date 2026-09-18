@@ -23,8 +23,7 @@ public class SwipeController {
 	/** Should be called from ScreenMixin on mouse press to check start zone. */
 	public static boolean onPress(AbstractContainerScreen<?> screen, double mx, double my, int button) {
 		if (!isEnabled()) return false;
-		// Start zones: free panel area or edge zone, NOT inside a Slot hitbox.
-		// Slot hitboxes have priority — we check isHoveringSlot.
+		// Start zones: free panel area or edge zone, NOT inside a Slot hitbox. Slot hitboxes have priority — we check isHoveringSlot.
 		if (isHoveringSlot(screen, mx, my)) return false;
 		startX = (float) mx;
 		startY = (float) my;

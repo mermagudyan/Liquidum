@@ -39,8 +39,7 @@ public final class IrisCompat {
 			try {
 				Class<?> api = Class.forName("net.irisshaders.iris.api.v0.IrisApi");
 				Object inst = api.getMethod("getInstance").invoke(null);
-				// Many Iris versions expose getPipelineManager etc; we probe for getMainTarget
-				// If not found, fallback to vanilla
+				// Many Iris versions expose getPipelineManager etc; we probe for getMainTarget If not found, fallback to vanilla
 				try {
 					var mt = api.getMethod("getMainTarget");
 					Object rt = mt.invoke(inst);

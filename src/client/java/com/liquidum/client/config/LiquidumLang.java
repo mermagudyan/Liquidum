@@ -41,6 +41,36 @@ public final class LiquidumLang {
 		return out;
 	}
 
+	// Short MC language code for buttons, RU for ru_*, EN for en_*, else upper pair
+	public static String langCode() {
+		try {
+			var mc = net.minecraft.client.Minecraft.getInstance();
+			if (mc != null && mc.getLanguageManager() != null) {
+				String code = mc.getLanguageManager().getSelected();
+				if (code != null && code.length() >= 2) return code.substring(0, 2).toUpperCase(java.util.Locale.ROOT);
+			}
+		} catch (Exception ignored) {
+		}
+		return "EN";
+	}
+
+	// Our language follows MC, so the button just opens the vanilla menu
+	public static void openLanguageMenu(net.minecraft.client.gui.screens.Screen parent) {
+		try {
+			var cfg = com.liquidum.client.LiquidumCore.getConfig();
+			if (cfg != null) {
+				cfg.language = "auto";
+				cfg.save();
+			}
+		} catch (Exception ignored) {
+		}
+		try {
+			var mc = net.minecraft.client.Minecraft.getInstance();
+			mc.gui.setScreen(new net.minecraft.client.gui.screens.options.LanguageSelectScreen(
+				parent, mc.options, mc.getLanguageManager()));
+		} catch (Exception ignored) {
+		}
+	}
 	// Same for option lists
 	public static java.util.List<String> trList(java.util.List<String> keys) {
 		var out = new java.util.ArrayList<String>(keys.size());
@@ -55,6 +85,7 @@ public final class LiquidumLang {
 		java.util.Map.entry("Стиль", "Style"),
 		java.util.Map.entry("Ещё", "More"),
 		java.util.Map.entry("Отладка", "Debug"),
+		java.util.Map.entry("Ванильные настройки", "Vanilla settings"),
 		java.util.Map.entry("Тягай стекло мышью прямо в окне", "Drag glass with the mouse right in the view"),
 		java.util.Map.entry("Слои стекла: что включено", "Glass layers: what is on"),
 		java.util.Map.entry("Кнопки - / + меняют стекло сразу", "- / + buttons change glass instantly"),
@@ -170,6 +201,7 @@ public final class LiquidumLang {
 		java.util.Map.entry("Угол света", "Light angle"),
 		java.util.Map.entry("Сила света", "Light level"),
 		java.util.Map.entry("Преломление", "Refraction"),
+		java.util.Map.entry("Ширина края", "Edge width"),
 		java.util.Map.entry("Кромка", "Edge"),
 		java.util.Map.entry("Чёткость", "Sharpness"),
 		java.util.Map.entry("Радиус мата", "Frost radius"),
@@ -193,7 +225,6 @@ public final class LiquidumLang {
 		java.util.Map.entry("Стекло на слотах", "Slot glass"),
 		java.util.Map.entry("Умный док", "Smart dock"),
 		java.util.Map.entry("Язык", "Language"),
-		java.util.Map.entry("Русский", "Russian"),
 		java.util.Map.entry("Сохранить ●", "Save ●"),
 		java.util.Map.entry("Сохранено ✓", "Saved ✓"),
 		java.util.Map.entry("Тест", "Test"),
@@ -211,6 +242,15 @@ public final class LiquidumLang {
 		java.util.Map.entry("круг", "circle"),
 		java.util.Map.entry("Выбрано", "Selected"),
 		java.util.Map.entry("Сцена", "Scene"),
+		java.util.Map.entry("Видео", "Video"),
+		java.util.Map.entry("Дисплей", "Display"),
+		java.util.Map.entry("Качество", "Quality"),
+		java.util.Map.entry("Прочее", "Misc"),
+		java.util.Map.entry("Нужен рестарт", "Restart required"),
+		java.util.Map.entry("Настройки", "Settings"),
+		java.util.Map.entry("Звук", "Sound"),
+		java.util.Map.entry("Управление", "Controls"),
+		java.util.Map.entry("Громкость", "Volume"),
 		java.util.Map.entry("объекта", "objects"),
 		java.util.Map.entry("групп", "groups")
 	);

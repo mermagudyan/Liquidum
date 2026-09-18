@@ -39,17 +39,21 @@ import java.util.List;
  */
 public class LiquidGlassRenderer {
 
-	public static final String BUILD_ID = "b29";
+	public static final String BUILD_ID = "b42";
 	public static int pendingTiles() { return pendingCount; }
 
 	private static final Identifier GLASS_CHAIN_ID =
 		Identifier.fromNamespaceAndPath("liquidum", "glass");
+	private static final Identifier OVERLAY_CHAIN_ID =
+		Identifier.fromNamespaceAndPath("liquidum", "glass_overlay");
 
 	private static boolean initialized = false;
 	private static boolean errored = false;
 
 	private static Object lastConfigs;
 	private static PostChain loadedChain;
+	private static PostChain loadedOverlayChain;
+	private static Object lastOverlayConfigs;
 	private static com.mojang.blaze3d.textures.GpuTextureView glassOutView;
 	private static RenderTarget glassOutTarget;
 
@@ -110,11 +114,20 @@ public class LiquidGlassRenderer {
 	}
 
 	private static void resolveGlassOutput(PostChain chain, RenderTarget main) {
-		// Engine rebuilds persistent targets from json descriptors every frame
-		// so Java resize alone never sticks: sync the descriptor sizes first
+		// Engine rebuilds persistent targets from json descriptors every frame so Java resize alone never sticks: sync the descriptor sizes first
 		for (var e : ((com.liquidum.client.mixin.PostChainAccessor) chain).liquidum$getPersistentTargets().entrySet()) {
 			var t = e.getValue();
 			String path = ((Identifier) e.getKey()).getPath();
+			// Overlay blur mirrors base frost at 0.65x
+			if (path.equals("overlay_blur") || path.equals("overlay_blur2")) {
+				int qw = Math.max(1, (int)(main.width * 0.65f));
+				int qh = Math.max(1, (int)(main.height * 0.65f));
+				if (t.width != qw || t.height != qh) {
+					t.resize(qw, qh);
+				}
+				syncTargetSize(chain, path, qw, qh);
+				continue;
+			}
 			// Blurred mip level for frost, quarter caused cubes on villager house
 			if (path.equals("blurred")) {
 				int qw = Math.max(1, (int)(main.width * 0.65f));
@@ -157,29 +170,32 @@ public class LiquidGlassRenderer {
 		logMipSizes(chain, main);
 	}
 
-	private static String lastMipLog = "";
+	private static String lastMipLogBase = "";
+	private static String lastMipLogOverlay = "";
+	private static long lastMipLogNanos = 0L;
 	private static void logMipSizes(PostChain chain, RenderTarget main) {
 		try {
 			var map = ((com.liquidum.client.mixin.PostChainAccessor) chain).liquidum$getPersistentTargets();
-			String s = main.width + "x" + main.height;
-			for (String n : new String[]{"blurred", "colorfield", "deepfield"}) {
-				for (var e : map.entrySet()) {
-					String p = ((Identifier) e.getKey()).getPath();
-					if (!n.equals(p)) continue;
-					var t = e.getValue();
-					s += " " + n + "=" + t.width + "x" + t.height;
-				}
+			StringBuilder sb = new StringBuilder(main.width + "x" + main.height);
+			for (var e : map.entrySet()) {
+				var t = e.getValue();
+				sb.append(" ").append(e.getKey()).append("=").append(t.width).append("x").append(t.height);
 			}
-			if (!s.equals(lastMipLog)) {
-				lastMipLog = s;
-				LiquidumMod.LOGGER.info("[glass] MIP main={}", s);
-			}
+			String s = sb.toString();
+			boolean overlay = chain == loadedOverlayChain;
+			if (overlay && s.equals(lastMipLogOverlay)) return;
+			if (!overlay && s.equals(lastMipLogBase)) return;
+			if (overlay) lastMipLogOverlay = s;
+			else lastMipLogBase = s;
+			long now = System.nanoTime();
+			if (now - lastMipLogNanos < 2_000_000_000L) return;
+			lastMipLogNanos = now;
+			LiquidumMod.LOGGER.info("[glass] MIP {}main={}", overlay ? "overlay " : "", s);
 		} catch (Exception ignored) {
 		}
 	}
 
-	// Engine sizes targets from json descriptors (orElse main size)
-	// so rewrite the record to match our resize, else it reallocates full
+	// Engine sizes targets from json descriptors (orElse main size) so rewrite the record to match our resize, else it reallocates full
 	private static boolean targetSyncWarned = false;
 	private static void syncTargetSize(PostChain chain, String path, int w, int h) {
 		try {
@@ -272,6 +288,82 @@ public class LiquidGlassRenderer {
 		return new int[]{ ix, iy, iw, ih };
 	}
 
+	/** Overlay tiles are popup sheets: TAIL composite samples the finished scene. */
+	public static boolean hasPopupTiles() {
+		for (int i = 0; i < pendingCount; i++) {
+			if (pendMat[i] == MAT_POPUP) return true;
+		}
+		return false;
+	}
+
+	// Sheets transmit over lower sheets, backing stays opaque
+	private static boolean isSheetMat(int m) {
+		return m == MAT_CONTROL || m == MAT_ACTIVE || m == MAT_DENSE;
+	}
+
+	private static final float[] upperLevels = new float[4];
+	private static int upperLevelCount = 0;
+
+	// Stacked sheet elevations over lower sheets, capped runs, refreshed per frame
+	private static void computeUpperLevels() {
+		upperLevelCount = 0;
+		for (int i = 0; i < pendingCount && upperLevelCount < upperLevels.length; i++) {
+			if (pendMat[i] == MAT_POPUP || !isSheetMat(pendMat[i])) continue;
+			for (int j = 0; j < pendingCount; j++) {
+				if (i == j || pendMat[j] == MAT_POPUP || !isSheetMat(pendMat[j])) continue;
+				if (pendElev[j] >= pendElev[i]) continue;
+				if (Math.abs(pendGrp[j] - pendGrp[i]) < 0.5f) continue;
+				int ox = Math.max(pendX[i], pendX[j]);
+				int ox1 = Math.min(pendX[i] + pendW[i], pendX[j] + pendW[j]);
+				int oy = Math.max(pendY[i], pendY[j]);
+				int oy1 = Math.min(pendY[i] + pendH[i], pendY[j] + pendH[j]);
+				if (ox1 - ox <= 5 || oy1 - oy <= 5) continue;
+				float e = pendElev[i];
+				boolean have = false;
+				for (int k = 0; k < upperLevelCount; k++) if (upperLevels[k] == e) { have = true; break; }
+				if (have) break;
+				int at = upperLevelCount;
+				while (at > 0 && upperLevels[at - 1] > e) { upperLevels[at] = upperLevels[at - 1]; at--; }
+				upperLevels[at] = e;
+				upperLevelCount++;
+				break;
+			}
+		}
+	}
+
+	/** Scissor union over popup tiles only, same pad as base. */
+	private static int[] computeOverlayScissorUnion(RenderTarget main) {
+		if (!hasPopupTiles()) return null;
+		float fw = main.width;
+		float fh = main.height;
+		float scale = fw / Math.max(1f, (float) pendingGuiW);
+		float pad = 24f * scale;
+		float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE;
+		float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
+		boolean has = false;
+		for (int i = 0; i < pendingCount; i++) {
+			if (pendMat[i] != MAT_POPUP) continue;
+			float hw = pendW[i] * 0.5f * scale;
+			float hh = pendH[i] * 0.5f * scale;
+			float cx = (pendX[i] + pendW[i] * 0.5f) * scale;
+			float cy = fh - (pendY[i] + pendH[i] * 0.5f) * scale;
+			float x0 = cx - hw, x1 = cx + hw, y0 = cy - hh, y1 = cy + hh;
+			if (!has) { minX = x0; maxX = x1; minY = y0; maxY = y1; has = true; }
+			else { minX = Math.min(minX, x0); maxX = Math.max(maxX, x1); minY = Math.min(minY, y0); maxY = Math.max(maxY, y1); }
+		}
+		if (!has) return null;
+		minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+		minX = Math.max(0, minX); minY = Math.max(0, minY);
+		maxX = Math.min(fw, maxX); maxY = Math.min(fh, maxY);
+		int ix = (int) Math.floor(minX);
+		int iy = (int) Math.floor(minY);
+		int iw = (int) Math.ceil(maxX - minX);
+		int ih = (int) Math.ceil(maxY - minY);
+		if (iw <= 0 || ih <= 0) return null;
+		if (iw * ih > fw * fh * 0.90f) return null;
+		return new int[]{ ix, iy, iw, ih };
+	}
+
 	/** Called by ShaderManagerMixin after every (re)load of shader configs. */
 	public static void onShaderConfigs(Object configs) {
 		if (configs != lastConfigs && DEBUG) {
@@ -283,9 +375,14 @@ public class LiquidGlassRenderer {
 				try { loadedChain.close(); } catch (Exception ignored) { }
 				loadedChain = null;
 			}
+			if (loadedOverlayChain != null) {
+				try { loadedOverlayChain.close(); } catch (Exception ignored) { }
+				loadedOverlayChain = null;
+			}
 			glassOutView = null;
 			glassOutTarget = null;
 			lastConfigs = null;
+			lastOverlayConfigs = null;
 			// F3+T must restore bliks even if light spring went NaN after 10s
 			lightDirX = 0f; lightDirY = 1f; lightDirVelX = 0f; lightDirVelY = 0f;
 			lightIntensity = 1f; lightIntensityVel = 0f; lightConfidence = 1f; lightDirNanos = 0L;
@@ -295,15 +392,18 @@ public class LiquidGlassRenderer {
 	}
 
 	private static GpuBuffer glassConfigBuffer;
+	// Separate UBO per chain: vanilla closes bound buffers, sharing killed base after the first TAIL run
+	private static GpuBuffer overlayConfigBuffer;
+	// Upper glass run reuses the base chain with its own plane buffer
+	private static GpuBuffer upperConfigBuffer;
 
 	private static final int MAX_PANELS = 128;
 	/** Максимум GridWell-дескрипторов за кадр (12 сеток хватает для любого
 	 *  ванильного контейнера: chest = content + inv + hotbar = 3 wells). */
 	public static final int MAX_WELLS = 12;
-	// rects[128] + mats[128] + wells[12x3] + params + count + screen + flags
-	// + ring + grid + panel + par + anim + wellMeta + fxFlame + fxChannel + tone + dockParams + lightDir + sun + bleed
+	// GlassConfig UBO layout: rects, mats, wells, cutouts, then param blocks
 	private static final int GLASS_CONFIG_BYTES =
-		MAX_PANELS * 16 * 2 + MAX_WELLS * 3 * 16 + 16 * 17;
+		MAX_PANELS * 16 * 2 + MAX_WELLS * 3 * 16 + 16 * 34;
 
 	/** Set true to dump the next screen's widget classes once (diagnostics). */
 	public static boolean dumpWidgetClasses = true;
@@ -327,12 +427,7 @@ public class LiquidGlassRenderer {
 		return slotsGlass;
 	}
 
-	// ─── Creative Tab Stack: frame-capture transition ───
-	// On tab switch the OLD tab appearance (already composited in main from
-	// the previous frame) is captured into the uiprev target; during the ~250ms
-	// transition it slides UP behind the panel edge (the shader clips it by the
-	// panel SDF), while the new content sits still beneath. No offsets on the
-	// live grid — tiles and items never desync.
+	// Tab transition: captured old frame slides up over the new content
 	private static boolean tabAnimActive = false;
 	private static long tabAnimStart = 0L;
 	private static com.mojang.blaze3d.platform.NativeImage tabPrevImage;
@@ -347,8 +442,7 @@ public class LiquidGlassRenderer {
 	}
 
 	public static void startTabTransition() {
-		// WIP: the capture/slide transition conflicts with scroll spring and
-		// needs polishing — disabled by default (tabTransition in config).
+		// WIP: the capture/slide transition conflicts with scroll spring and needs polishing — disabled by default (tabTransition in config).
 		if (!tabTransitionEnabled) return;
 		captureTabFrame();
 		tabAnimActive = true;
@@ -402,10 +496,7 @@ public class LiquidGlassRenderer {
 	}
 
 
-	// ─── Единая система материалов (иерархия слоёв Liquidum) ───
-	// Эталон — BASE SURFACE инвентаря. Роли отличаются ПАРАМЕТРАМИ одного
-	// материала (никаких отдельных проходов): чем больше элемент, тем
-	// спокойнее; чем меньше и интерактивнее, тем живее.
+	// One material, roles differ by params: bigger is calmer, smaller is livelier
 	/** L1 BASE SURFACE — большая спокойная поверхность окна. */
 	public static final int MAT_BASE = 0;
 	/** Слот — минимальная единица сетки, тихий fill + тонкий edge. */
@@ -422,6 +513,10 @@ public class LiquidGlassRenderer {
 	public static final int MAT_DENSE = 6;
 	/** Luminance Dock: адаптивная HUD-поверхность под hearts/food/armor/xp (очень лёгкая). */
 	public static final int MAT_DOCK = 7;
+	// Popup sheet: boosted matte, follows user frost and tint
+	public static final int MAT_POPUP = 8;
+	// Settings card: static full matte, ignores user frost and tint
+	public static final int MAT_CARD = 9;
 
 	/** One container slot: 18x18 gui px WELL (fusable+dense) - a recessed
 	 *  cell etched into the frosted panel, no gaps: the whole inventory reads
@@ -528,16 +623,13 @@ public class LiquidGlassRenderer {
 		if (p.startsWith("recipe_book/tab")) {
 			return p.contains("selected") ? MAT_ACTIVE : MAT_CONTROL;
 		}
-		// Выбранный рецепт: vanilla красная рамка (recipe_book/overlay*)
-		// заменяется состоянием ACTIVE того же материала.
+		// Выбранный рецепт: vanilla красная рамка (recipe_book/overlay*) заменяется состоянием ACTIVE того же материала.
 		if (p.startsWith("recipe_book/overlay")) return MAT_ACTIVE;
-		// Вкладки креатива: активная — тот же COMPANION что инвентарь (одна поверхность),
-		// неактивные — CONTROL; вся группа один слой высота 0 группа 0.
+		// Вкладки креатива: активная — тот же COMPANION что инвентарь (одна поверхность), неактивные — CONTROL; вся группа один слой высота 0 группа 0.
 		if (p.startsWith("container/creative_inventory/tab_")) {
 			return p.contains("selected") ? MAT_COMPANION : MAT_CONTROL;
 		}
-		// Трек скроллбара креатива — тихое стекло вместо белой полосы
-		// (сам ползунок-scroller остаётся ванильным — это ручка).
+		// Трек скроллбара креатива — тихое стекло вместо белой полосы (сам ползунок-scroller остаётся ванильным — это ручка).
 		if (p.equals("widget/scroller_background")) return MAT_SLOT;
 		return -1;
 	}
@@ -564,9 +656,7 @@ public class LiquidGlassRenderer {
 		appendRect(x, y, w, h, MAT_GROUP);
 	}
 
-	// ─── Recipe Book button: icon-only (P3/P14/P34) ───
-	// Vanilla widget/hitbox/click are untouched — we only cancel the full
-	// button sprite and draw a book item glyph on a subtle MAT_CONTROL body.
+	// Recipe Book button keeps hitbox, glass body plus book glyph only
 	private static boolean drawingBookIcon = false;
 	private static int lastRecipeBookX = -1, lastRecipeBookY = -1, lastRecipeBookW = -1, lastRecipeBookH = -1;
 
@@ -592,12 +682,7 @@ public class LiquidGlassRenderer {
 		}
 	}
 
-	// ─── GridWell: процедурная recessed-сетка (визуальный примитив) ───
-	// Группа vanilla Slot подаётся ОДНИМ дескриптором: шейдер математически
-	// определяет ячейку по координате пикселя — без per-slot циклов и
-	// без отдельных blur/mask на каждый слот (54 слота = та же стоимость,
-	// что 9). Vanilla Slot остаются нетронутыми логически.
-	// layout per well (gui px): [x0,y0, cellW,cellH | pitchX,pitchY, cols,rows | hoverCol,hoverRow, 0,0]
+	// GridWell: one descriptor per slot grid, cells resolved in-shader
 	private static final java.util.List<Object[]> deferredSprites = new java.util.ArrayList<>();
 	private static final java.util.List<Object[]> deferredBlits = new java.util.ArrayList<>();
 	private static final java.util.List<Object[]> deferredTabIcons = new java.util.ArrayList<>();
@@ -809,11 +894,7 @@ public class LiquidGlassRenderer {
 		fxChX0 = chX0; fxChY = chY; fxChLen = chLen; fxCook = cookProgress;
 	}
 
-	// ─── Appearance (LIGHT/DARK/AUTO + custom tint, roadmap §1–3) ───
-	// Это состояния ОДНОГО материала: darkness управляет только плотностью
-	// внутри glass mask; refraction/edge остаются. AUTO считается из
-	// ОКРУЖЕНИЯ ИГРОКА (не из камеры!) — поэтому нет flicker при повороте,
-	// плюс экспоненциальное сглаживание (hysteresis ~0.4 c).
+	// Appearance states of one material, AUTO reads player surroundings
 	private static final int APPEAR_AUTO = 0, APPEAR_LIGHT = 1, APPEAR_DARK = 2;
 	private static int appearanceMode = APPEAR_AUTO;
 	private static float darkSmooth = 0f;         // сглаженный 0..1
@@ -1050,12 +1131,7 @@ public class LiquidGlassRenderer {
 		return hudPanelArea;
 	}
 
-	// ─── L4 FOREGROUND DEFERRAL ───
-	// Vanilla извлекает динамические модели (игрок в инвентаре, книга
-	// зачарований, флаг ткацкого станка) из extractBackground — это ДО-blur
-	// фаза, поэтому они размываются стеклом. Мы отменяем вызов на этапе
-	// экстракта и переигрываем его в widget-фазе ПОСЛЕ glass composite —
-	// модель резкая, как item icon. Без координатных хаков.
+	// L4: models extracted pre-blur get cancelled and replayed sharp post-glass
 
 	/** Откладывать ли foreground-модели: только когда стекло реально
 	 *  заменяет фон контейнерного экрана. Во время replay — НИКОГДА
@@ -1248,8 +1324,7 @@ public class LiquidGlassRenderer {
 		if (full && hasOffhand) {
 			appendRect(Math.round(fx) - 30, Math.round(fy), 24, 22, MAT_SLOT);            // offhand: LEFT, centred on the item
 		}
-		// Hotbar — часть той же mask-системы, что Dock (§17): Inner+Outer из одной SDF,
-		// но пока подаётся как MAT_DENSE (плотный), профиль подчинится dock outer в шейдере
+		// Hotbar shares the dock mask system, submitted dense for now
 		appendRect(x0, y0, bw, bh, full ? MAT_DENSE : MAT_ACTIVE);
 		hudSelTargetX = -1f;
 		hudSelCenterYGui = y0 + 11;
@@ -1259,8 +1334,7 @@ public class LiquidGlassRenderer {
 		}
 	}
 
-	// Soft white frame for the selected hotbar cell
-	// White ring glide state, exponential smoothing like hudSelX
+	// Soft white frame for the selected hotbar cell White ring glide state, exponential smoothing like hudSelX
 	private static float selRingX = -1f;
 	private static long selRingNanos = 0L;
 
@@ -1350,8 +1424,7 @@ public class LiquidGlassRenderer {
 	private static float worldLightX = 0f, worldLightY = 1f, worldLightZ = 0f;
 	private static float filteredWx = 0f, filteredWy = 1f, filteredWz = 0f;
 	private static float worldVelX = 0f, worldVelY = 0f, worldVelZ = 0f;
-	// WOW sun colour (linear-ish 0..1), exponentially smoothed like darkSmooth.
-	// Noon white / sunset orange / torch warm / Nether red / End violet.
+	// WOW sun colour (linear-ish 0..1), exponentially smoothed like darkSmooth. Noon white / sunset orange / torch warm / Nether red / End violet.
 	private static float sunR = 1f, sunG = 0.98f, sunB = 0.94f;
 	private static long sunNanos = 0L;
 
@@ -1398,8 +1471,125 @@ public class LiquidGlassRenderer {
 	private static int pendingCount = 0;
 	private static int pendingGuiW = 1;
 	private static int pendingGuiH = 1;
-	// Button elevation: previous frame CONTROL/ACTIVE tiles, replay clips HUD items under them
-	// Wells and slots never stored, items belong inside them
+
+	// Overlay content cutouts (gui px rects), TAIL run keeps them sharp
+	private static final int MAX_CUTS = 16;
+	private static final int[] cutRect = new int[MAX_CUTS * 4];
+	private static int cutCount = 0;
+
+	public static void submitOverlayCutout(int x, int y, int w, int h) {
+		if (cutCount >= MAX_CUTS || w <= 0 || h <= 0) return;
+		int b = cutCount * 4;
+		cutRect[b] = x;
+		cutRect[b + 1] = y;
+		cutRect[b + 2] = w;
+		cutRect[b + 3] = h;
+		cutCount++;
+	}
+
+	// Left-aligned label stays sharp above popup glass
+	public static void submitTextCutout(net.minecraft.client.gui.Font font, String text, int x, int y) {
+		if (font == null || text == null || text.isEmpty()) return;
+		submitOverlayCutout(x - 3, y - 3, font.width(text) + 6, font.lineHeight + 6);
+	}
+
+	// Centered label uses the same x0 math as centeredText
+	public static void submitCenteredCutout(net.minecraft.client.gui.Font font, String text, int cx, int y) {
+		if (font == null || text == null || text.isEmpty()) return;
+		int w = font.width(text);
+		submitOverlayCutout(cx - w / 2 - 3, y - 3, w + 6, font.lineHeight + 6);
+	}
+
+	// Tooltip box keeps its own sharp rect above popup glass
+	public static void submitTooltipCutout(net.minecraft.client.gui.Font font,
+	                                        java.util.List<net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipComponent> lines,
+	                                        int x, int y,
+	                                        net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipPositioner positioner,
+	                                        int guiW, int guiH) {
+		if (font == null || lines == null || lines.isEmpty() || positioner == null) return;
+		int w = 0;
+		int h = lines.size() == 1 ? -2 : 0;
+		for (var c : lines) {
+			if (c == null) continue;
+			w = Math.max(w, c.getWidth(font));
+			h += c.getHeight(font);
+		}
+		if (w <= 0 || h <= 0) return;
+		var pos = positioner.positionTooltip(guiW, guiH, x, y, w, h);
+		submitOverlayCutout(pos.x() - 12, pos.y() - 12, w + 24, h + 24);
+	}
+
+	// Screens with custom extractRenderState bypass ScreenMixin, HUD sizes may be stale or never set (main menu)
+	public static void setPendingGuiSize(int w, int h) {
+		pendingGuiW = Math.max(1, w);
+		pendingGuiH = Math.max(1, h);
+	}
+
+	// Post-glass vector replay: stashed popup rows drawn crisp after overlay
+	private static final java.util.List<Object[]> popupReplayTexts = new java.util.ArrayList<>();
+	private static final java.util.List<Object[]> popupReplayChecks = new java.util.ArrayList<>();
+
+	public static boolean hasPopupReplay() {
+		return !popupReplayTexts.isEmpty() || !popupReplayChecks.isEmpty();
+	}
+
+	// Draw index window for the late replay range, refreshed every frame
+	public static int replayCap = Integer.MAX_VALUE;
+	public static int replayStart = -1;
+
+	// Widget copy cancelled at extract, replay owns the pixels
+	public static boolean deferPopupReplay() {
+		return enabled && hasPopupTiles();
+	}
+
+	public static void stashPopupText(net.minecraft.client.gui.Font font, String label,
+	                                  int x, int y, int color, boolean shadow, org.joml.Matrix3x2f pose) {
+		if (popupReplayTexts.size() >= 32 || font == null || label == null) return;
+		net.minecraft.util.FormattedCharSequence seq = net.minecraft.locale.Language.getInstance()
+			.getVisualOrder(net.minecraft.network.chat.FormattedText.of(label));
+		popupReplayTexts.add(new Object[]{ font, seq, pose, x, y, color, shadow });
+	}
+
+	public static void stashPopupCheck(com.mojang.blaze3d.pipeline.RenderPipeline pipeline,
+	                                   int qx, int qy, int color, org.joml.Matrix3x2f pose) {
+		if (popupReplayChecks.size() >= 16 || pipeline == null) return;
+		popupReplayChecks.add(new Object[]{ pipeline, pose, qx, qy + 3, qx + 3, qy + 5, color });
+		popupReplayChecks.add(new Object[]{ pipeline, pose, qx + 3, qy + 1, qx + 9, qy + 3, color });
+	}
+
+	// Late overlay point owns these, returns replayed element count
+	public static int submitPopupReplay(net.minecraft.client.renderer.state.gui.GuiRenderState state) {
+		if (!hasPopupReplay()) return 0;
+		state.nextStratum();
+		int n = 0;
+		for (Object[] r : popupReplayTexts) {
+			final org.joml.Matrix3x2f pose = (org.joml.Matrix3x2f) r[2];
+			var st = new net.minecraft.client.renderer.state.gui.GuiTextRenderState(
+				(net.minecraft.client.gui.Font) r[0], (net.minecraft.util.FormattedCharSequence) r[1], pose,
+				(Integer) r[3], (Integer) r[4], (Integer) r[5],
+				0, (Boolean) r[6], false, null);
+			var prepared = st.ensurePrepared();
+			state.addText(st);
+			// Glyph visit mirrors vanilla prepareText, lands in our stratum
+			prepared.visit(new net.minecraft.client.gui.Font.GlyphVisitor() {
+				@Override
+				public void acceptRenderable(net.minecraft.client.gui.font.TextRenderable renderable) {
+					state.addGlyphToCurrentLayer(new net.minecraft.client.renderer.state.gui.GlyphRenderState(pose, renderable, null));
+				}
+			});
+			n++;
+		}
+		for (Object[] r : popupReplayChecks) {
+			state.addGuiElement(new net.minecraft.client.renderer.state.gui.ColoredRectangleRenderState(
+				(com.mojang.blaze3d.pipeline.RenderPipeline) r[0],
+				net.minecraft.client.gui.render.TextureSetup.noTexture(),
+				(org.joml.Matrix3x2f) r[1], (Integer) r[2], (Integer) r[3],
+				(Integer) r[4], (Integer) r[5], (Integer) r[6], (Integer) r[6], null));
+			n++;
+		}
+		return n;
+	}
+	// Button elevation: previous frame CONTROL/ACTIVE tiles, replay clips HUD items under them Wells and slots never stored, items belong inside them
 	private static final int ELEV_MAX = 64;
 	private static final int[] elevX = new int[ELEV_MAX];
 	private static final int[] elevY = new int[ELEV_MAX];
@@ -1455,6 +1645,12 @@ public class LiquidGlassRenderer {
 		if (s instanceof net.minecraft.client.gui.screens.options.OptionsSubScreen) return false;
 		return true;
 	}
+	// Options sheets leave HUD items in the background, Done glass covers them
+	public static boolean keepHudItemsBackground() {
+		var s = Minecraft.getInstance().gui.screen();
+		if (s instanceof net.minecraft.client.gui.screens.options.OptionsScreen) return true;
+		return s instanceof net.minecraft.client.gui.screens.options.OptionsSubScreen;
+	}
 	/** Index of the first HUD-submitted tile this frame; animation skips HUD tiles. */
 	private static int hudTilesFrom = -1;
 	/** Index of the first container-SLOT tile this frame — parallax range marker. */
@@ -1477,8 +1673,7 @@ public class LiquidGlassRenderer {
 
 	private static void updateParallaxMouse() {
 		Minecraft mc = Minecraft.getInstance();
-		// FB px — window->fb чтобы parallax и shader были в одной СК, иначе сдвиг влево (§C).
-		// Отдельно X/Y — DPI может быть не квадратным, берём mainW/winW и mainH/winH.
+		// Mouse in fb px so parallax and shader share one space
 		var main = mc.gameRenderer != null ? mc.gameRenderer.mainRenderTarget() : null;
 		float fbW = main != null ? main.width : mainW();
 		float fbH = main != null ? main.height : fbW * 9f/16f;
@@ -1515,8 +1710,7 @@ public class LiquidGlassRenderer {
 		updateParallaxMouse();
 		float scale = mainW() / pendingGuiW;
 		float mgx = parX / scale, mgy = parY / scale;
-		// GATE: parallax activates ONLY when the cursor is over a slot cell —
-		// hovering tabs/buttons must not pull neighbouring items.
+		// GATE: parallax activates ONLY when the cursor is over a slot cell — hovering tabs/buttons must not pull neighbouring items.
 		boolean cursorOnSlot = false;
 		for (int i = slotTilesFrom < 0 ? pendingCount : slotTilesFrom; i < pendingCount; i++) {
 			if (mgx >= pendX[i] - 1 && mgx <= pendX[i] + pendW[i] + 1
@@ -1573,6 +1767,7 @@ public class LiquidGlassRenderer {
 	 * APPENDS to this frame's batch: layered UI extracts several screens per
 	 * frame (title + invisible realms/notification overlays) and a later
 	 * zero-button screen must NOT wipe tiles submitted by the one below it.
+	 * Snapshot elev here (batch full at extract TAIL), replay stays early.
 	 */
 	public static void submitWidgets(int guiW, int guiH, List<int[]> rects) {
 		pendingGuiW = Math.max(1, guiW);
@@ -1580,8 +1775,9 @@ public class LiquidGlassRenderer {
 		for (int[] r : rects) {
 			int mat = r.length >= 5 ? r[4] : MAT_CONTROL;
 			float grp = r.length >= 6 ? (float) r[5] : 0f;
-			appendRect(r[0], r[1], r[2], r[3], mat, 0f, grp);
+			appendRect(r[0], r[1], r[2], r[3], mat, 2f, grp);
 		}
+		snapshotElevTiles(Minecraft.getInstance());
 	}
 
 	/** Called at frame end (GameRenderer.render TAIL) to re-arm the guard and drop stale rects.
@@ -1592,9 +1788,7 @@ public class LiquidGlassRenderer {
 		hudTilesFrom = -1;
 		slotTilesFrom = -1;
 		hudGridX = -1f;
-		// Panel area resets each frame so the rect re-wins from CURRENT screen
-		// geometry (recipe book open/close shifts the panel). Coordinates are
-		// kept: captureTabFrame (fires on click, between frames) reads them.
+		// Panel area re-wins every frame from current screen geometry
 		hudPanelArea = 0;
 		bookX0 = 0; bookY0 = 0; bookX1 = -1; bookY1 = -1;
 		blurMarkerSeen = false;
@@ -1605,6 +1799,8 @@ public class LiquidGlassRenderer {
 		deferredBlits.clear();
 		deferredTabIcons.clear();
 		deferredTexts.clear();
+		popupReplayTexts.clear();
+		popupReplayChecks.clear();
 		deferredHudItems.clear();
 		deferredHudDecor.clear();
 		iconKeyCount = 0;
@@ -1613,6 +1809,7 @@ public class LiquidGlassRenderer {
 		pendingMapDraw = null;
 		wellCount = 0;
 		wellCellCount = 0;
+		cutCount = 0;
 		fxLit = -1f;
 		fxCook = -1f;
 		// §15 state leakage: при выходе из мира / hide HUD сбрасываем HUD-кольцо и dock
@@ -1625,24 +1822,45 @@ public class LiquidGlassRenderer {
 	/**
 	 * Frame-scoped flag: true once the blur-stratum marker
 	 * (GuiRenderState.blurBeforeThisStratum) has been requested this frame —
-	 * by vanilla (extractBlurredBackground) or by us (ScreenMixin fallback).
-	 * The engine throws on a second call within one frame.
+	 * by us or directly by a foreign screen, vanilla throws on a second call.
 	 */
 	private static boolean blurMarkerSeen = false;
 
-	public static boolean isBlurMarkerSeen() {
-		return blurMarkerSeen;
-	}
-
 	public static void setBlurMarkerSeen() {
 		blurMarkerSeen = true;
+	}
+
+	// Ground truth beats the shadow flag: foreign screens may mark directly
+	public static boolean isBlurMarkerSet() {
+		if (blurMarkerSeen) return true;
+		try {
+			var mc = Minecraft.getInstance();
+			if (mc.gameRenderer != null) {
+				var guiState = mc.gameRenderer.gameRenderState().guiRenderState;
+				if (guiState != null && ((com.liquidum.client.mixin.GuiRenderStateAccessor) guiState).liquidum$getFirstStratumAfterBlur() != Integer.MAX_VALUE) {
+					blurMarkerSeen = true;
+					return true;
+				}
+			}
+		} catch (Exception ignored) {}
+		return false;
 	}
 
 	/** Run at vanilla's blur-before-stratum point, at most once per frame. */
 	public static void applyOncePerFrame() {
 		if (frameDone || !enabled) return;
 		frameDone = true;
+		submitProbeTile();
 		renderGlassPostChain();
+	}
+
+	// Debug probe renders on every screen without widget backing
+	public static void submitProbeTile() {
+		if (!com.liquidum.client.debug.LiquidumDebugState.probeShow) return;
+		int d = Math.max(16, Math.round(com.liquidum.client.debug.LiquidumDebugState.probeDiameter));
+		int x = Math.round(com.liquidum.client.debug.LiquidumDebugState.probeX - d * 0.5f);
+		int y = Math.round(com.liquidum.client.debug.LiquidumDebugState.probeY - d * 0.5f);
+		appendRect(x, y, d, d, MAT_CONTROL, 2f, 0f, 2.0f);
 	}
 
 	/**
@@ -1658,8 +1876,7 @@ public class LiquidGlassRenderer {
 
 		if (loadedChain != null && configs == lastConfigs) return loadedChain;
 
-		// Fast path: vanilla cache РІР‚вЂќ but only until it fails once (its failure
-		// is cached AND it logs an ERROR per attempt; direct load is quiet).
+		// Fast path: vanilla cache РІР‚вЂќ but only until it fails once (its failure is cached AND it logs an ERROR per attempt; direct load is quiet).
 		PostChain chain = null;
 		if (resolveFailures == 0) {
 			chain = sm.getPostChain(GLASS_CHAIN_ID,
@@ -1692,6 +1909,46 @@ public class LiquidGlassRenderer {
 		return chain;
 	}
 
+	private static int overlayResolveFailures = 0;
+
+	// Separate instance: first process() call binds main fresh at TAIL (finished scene)
+	private static PostChain resolveOverlayChain(Minecraft mc) {
+		var sm = mc.getShaderManager();
+		Object configs = currentConfigs;
+		if (configs == null) return null;
+		if (loadedOverlayChain != null && configs == lastOverlayConfigs) return loadedOverlayChain;
+		PostChain chain = null;
+		if (overlayResolveFailures == 0) {
+			try {
+				chain = sm.getPostChain(OVERLAY_CHAIN_ID,
+					java.util.Set.of(PostChain.MAIN_TARGET_ID));
+			} catch (Exception ignored) { chain = null; }
+		}
+		if (chain == null) {
+			try {
+				Object cfg = ((com.liquidum.client.mixin.ConfigsAccessor) configs).liquidum$getPostChains()
+					.get(OVERLAY_CHAIN_ID);
+				if (cfg == null) return null;
+				chain = PostChain.load((net.minecraft.client.renderer.PostChainConfig) cfg,
+					mc.getTextureManager(),
+					java.util.Set.of(PostChain.MAIN_TARGET_ID),
+					OVERLAY_CHAIN_ID,
+					((com.liquidum.client.mixin.ShaderManagerAccessor) sm).liquidum$getProjection(),
+					((com.liquidum.client.mixin.ShaderManagerAccessor) sm).liquidum$getProjectionMatrixBuffer());
+				overlayResolveFailures = 0;
+			} catch (Exception e) {
+				overlayResolveFailures++;
+				if (overlayResolveFailures == 1 || overlayResolveFailures % 60 == 0) {
+					LiquidumMod.LOGGER.warn("[glass] overlay load pending (x{}): {}", overlayResolveFailures, e.toString());
+				}
+				return null;
+			}
+		}
+		loadedOverlayChain = chain;
+		lastOverlayConfigs = configs;
+		return chain;
+	}
+
 	/** Apply the glass effect to the main framebuffer via the PostChain. */
 	public static void renderGlassPostChain() {
 		if (!enabled) {
@@ -1699,8 +1956,7 @@ public class LiquidGlassRenderer {
 			return;
 		}
 		Minecraft mc = Minecraft.getInstance();
-		// A failed getPostChain lookup is cached permanently inside CompilationCache,
-		// so never query before client resources have finished loading.
+		// A failed getPostChain lookup is cached permanently inside CompilationCache, so never query before client resources have finished loading.
 		if (mc.gui == null || mc.gui.overlay() != null) return;
 		if (!initialized) init();
 		if (!initialized || errored || mc.gameRenderer == null) return;
@@ -1725,11 +1981,12 @@ public class LiquidGlassRenderer {
 
 		try {
 			resolveGlassOutput(chain, main);
+			computeUpperLevels();
 			hookGlassUniform(chain);
-			writePanelUniform(mc, main);
+			float cutElev = upperLevelCount > 0 ? upperLevels[0] - 0.001f : Float.POSITIVE_INFINITY;
+			writePanelUniform(mc, main, 0f, true, cutElev, Float.POSITIVE_INFINITY);
 
-			// S.8 scissor: restrict glass work to union of uPanel + uRects (panels/tiles) — SDF stays full-res,
-			// downsampled blur still covers the union, final composite is cropped. Saves fillrate.
+			// Scissor glass work to panel/tile union, saves fillrate
 			int[] scissor = computeScissorUnion(main);
 			boolean scissorOn = false;
 			if (scissor != null) {
@@ -1755,8 +2012,14 @@ public class LiquidGlassRenderer {
 					try { GlStateManager._disableScissorTest(); } catch (Throwable ignored) {}
 				}
 			}
-			consecutiveErrors = 0;
-			logFrame(LiquidumDebugState.mode, pendingCount, true, "ran");
+		consecutiveErrors = 0;
+		logFrame(LiquidumDebugState.mode, pendingCount, true, "ran");
+
+		for (int k = 0; k < upperLevelCount; k++) {
+			float hi = k == upperLevelCount - 1 ? Float.POSITIVE_INFINITY : upperLevels[k];
+			float lo = k == 0 ? upperLevels[0] - 0.001f : upperLevels[k - 1];
+			runUpperPass(mc, main, chain, lo, hi);
+		}
 
 
 			boolean dbg = DEBUG && (debugCount < 3 || debugCount % 600 == 0);
@@ -1766,8 +2029,7 @@ public class LiquidGlassRenderer {
 				glassOutTarget != null ? glassOutTarget.height : -1,
 				glassOutView != null);
 		} catch (Throwable t) {
-			// Resource reloads can transiently invalidate the chain; retry next
-			// frame instead of latching off forever.
+			// Resource reloads can transiently invalidate the chain; retry next frame instead of latching off forever.
 			consecutiveErrors++;
 			LiquidumMod.LOGGER.error("[glass] post chain process failed (attempt {})", consecutiveErrors, t);
 			if (LiquidumDebugState.crashOnError) {
@@ -1777,8 +2039,102 @@ public class LiquidGlassRenderer {
 		debugCount++;
 	}
 
+	/** Second base run: raised tiles sample the lower composite, glass over glass. */
+	private static float lastUpperLo = Float.NaN, lastUpperHi = Float.NaN;
+	private static int lastUpperInWindow = -1, lastUpperPend = -1;
+	private static void runUpperPass(Minecraft mc, RenderTarget main, PostChain chain, float lo, float hi) {
+		try {
+			hookUpperUniform(chain);
+			writePanelUniform(mc, main, 1f, false, lo, hi);
+			int[] scissor = computeScissorUnion(main);
+			boolean scissorOn = false;
+			if (scissor != null) {
+				try {
+					GlStateManager._enableScissorTest();
+					GlStateManager._scissorBox(scissor[0], scissor[1], scissor[2], scissor[3]);
+					scissorOn = true;
+				} catch (Throwable t) {
+					LiquidumMod.LOGGER.warn("[glass] upper scissor failed: {}", t.toString());
+				}
+			}
+			try {
+				chain.process(main, GraphicsResourceAllocator.UNPOOLED);
+			} finally {
+				if (scissorOn) {
+					try { GlStateManager._disableScissorTest(); } catch (Throwable ignored) {}
+				}
+			}
+			if (DEBUG) {
+				int inWindow = 0;
+				for (int i = 0; i < pendingCount; i++) {
+					if (pendMat[i] != MAT_POPUP && isSheetMat(pendMat[i]) && pendElev[i] > lo && pendElev[i] <= hi) inWindow++;
+				}
+				if (lo != lastUpperLo || hi != lastUpperHi || inWindow != lastUpperInWindow || pendingCount != lastUpperPend) {
+					lastUpperLo = lo;
+					lastUpperHi = hi;
+					lastUpperInWindow = inWindow;
+					lastUpperPend = pendingCount;
+					LiquidumMod.LOGGER.info("[glass] upper pass lo={} hi={} inWindow={} pend={}", lo, hi, inWindow, pendingCount);
+				}
+			}
+		} catch (Throwable t) {
+			LiquidumMod.LOGGER.error("[glass] upper process failed", t);
+		}
+	}
+
+	// TAIL composite over the finished scene: popup samples baseScene, cutouts keep own text sharp.
+	public static void renderOverlayPostChain() {
+		if (!enabled) return;
+		if (!hasPopupTiles()) return;
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.gui == null || mc.gui.overlay() != null) return;
+		if (!initialized || errored || mc.gameRenderer == null) return;
+		RenderTarget main = mc.gameRenderer.mainRenderTarget();
+		if (main == null) return;
+		PostChain chain = resolveOverlayChain(mc);
+		if (chain == null) return;
+		try {
+			resolveGlassOutput(chain, main);
+			hookOverlayUniform(chain);
+			writePanelUniform(mc, main, 2f);
+			int[] scissor = computeOverlayScissorUnion(main);
+			boolean scissorOn = false;
+			if (scissor != null) {
+				try {
+					GlStateManager._enableScissorTest();
+					GlStateManager._scissorBox(scissor[0], scissor[1], scissor[2], scissor[3]);
+					scissorOn = true;
+				} catch (Throwable t) {
+					LiquidumMod.LOGGER.warn("[glass] overlay scissor failed: {}", t.toString());
+				}
+			}
+			try {
+				chain.process(main, GraphicsResourceAllocator.UNPOOLED);
+			} finally {
+				if (scissorOn) {
+					try { GlStateManager._disableScissorTest(); } catch (Throwable ignored) {}
+				}
+			}
+			if (cutCount != lastCutLogged) {
+				lastCutLogged = cutCount;
+				if (cutCount > 0) {
+					LiquidumMod.LOGGER.info("[glass] overlay cuts={} main={}x{} cut0=[{},{},{}x{}]", cutCount,
+						main.width, main.height, cutRect[0], cutRect[1], cutRect[2], cutRect[3]);
+				} else {
+					LiquidumMod.LOGGER.info("[glass] overlay cuts=0");
+				}
+			}
+			if (DEBUG && debugCount % 600 == 0) {
+				LiquidumMod.LOGGER.info("[glass] overlay ran pend={}", pendingCount);
+			}
+		} catch (Throwable t) {
+			LiquidumMod.LOGGER.error("[glass] overlay process failed", t);
+		}
+	}
+
 	private static int consecutiveErrors = 0;
 	private static int resolveFailures = 0;
+	private static int lastCutLogged = -1;
 	private static float passMsSmooth;
 	private static int lastLoggedCount = -1;
 	private static int diagCount = 0;
@@ -1815,18 +2171,53 @@ public class LiquidGlassRenderer {
 	/**
 	 * Replace the engine-created static "GlassConfig" UBO of the glass pass with
 	 * our own mappable one. Re-done whenever the chain was rebuilt (F3+T).
+	 * Each chain gets its own buffer object (lifecycles are independent).
 	 */
 	private static void hookGlassUniform(PostChain chain) {
+		hookGlassUniformInto(chain, false);
+	}
+
+	private static void hookOverlayUniform(PostChain chain) {
+		hookGlassUniformInto(chain, true);
+	}
+
+	private static void hookGlassUniformInto(PostChain chain, boolean overlay) {
+		hookGlassUniformInto(chain, overlay ? overlayBuffer() : glassBuffer());
+	}
+
+	// Upper run binds its own plane buffer into the same glass pass
+	private static void hookUpperUniform(PostChain chain) {
+		hookGlassUniformInto(chain, upperBuffer());
+	}
+
+	private static GpuBuffer glassBuffer() {
 		GpuDevice device = RenderSystem.getDevice();
-		// MC's PostPass.addToFrame CLOSES the GpuBuffer held in customUniforms at
-		// the end of every frame, so our buffer dies after frame 1. Recreate it
-		// whenever it is dead and re-bind it EVERY frame (no "already hooked"
-		// shortcut) — otherwise the shader reads a stale/closed zeroed UBO and
-		// produces a flat 0,0-coloured screen.
 		if (glassConfigBuffer == null || glassConfigBuffer.isClosed()) {
 			glassConfigBuffer = device.createBuffer(() -> "liquidum glass config",
 				GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE | GpuBuffer.USAGE_COPY_DST, GLASS_CONFIG_BYTES);
 		}
+		return glassConfigBuffer;
+	}
+
+	private static GpuBuffer overlayBuffer() {
+		GpuDevice device = RenderSystem.getDevice();
+		if (overlayConfigBuffer == null || overlayConfigBuffer.isClosed()) {
+			overlayConfigBuffer = device.createBuffer(() -> "liquidum overlay config",
+				GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE | GpuBuffer.USAGE_COPY_DST, GLASS_CONFIG_BYTES);
+		}
+		return overlayConfigBuffer;
+	}
+
+	private static GpuBuffer upperBuffer() {
+		GpuDevice device = RenderSystem.getDevice();
+		if (upperConfigBuffer == null || upperConfigBuffer.isClosed()) {
+			upperConfigBuffer = device.createBuffer(() -> "liquidum upper config",
+				GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE | GpuBuffer.USAGE_COPY_DST, GLASS_CONFIG_BYTES);
+		}
+		return upperConfigBuffer;
+	}
+
+	private static void hookGlassUniformInto(PostChain chain, GpuBuffer buf) {
 		boolean hooked = false;
 		for (var pass : ((PostChainAccessor) chain).liquidum$getPasses()) {
 			RenderPipeline pipeline = ((PostPassAccessor) pass).liquidum$getPipeline();
@@ -1834,10 +2225,9 @@ public class LiquidGlassRenderer {
 			if (DEBUG && debugCount == 0 && frag != null) {
 				LiquidumMod.LOGGER.info("[glass] pass frag shader = {} (match key = post/glass)", frag);
 			}
-			// MC resolves the JSON "fragment_shader": "liquidum:post/glass" to
-			// "<ns>:shaders/post/glass" — match by exact path, not by substring.
+			// MC resolves the JSON "fragment_shader": "liquidum:post/glass" to "<ns>:shaders/post/glass" — match by exact path, not by substring.
 			if (frag != null && frag.getPath().equals("post/glass")) {
-				((PostPassAccessor) pass).liquidum$getCustomUniforms().put("GlassConfig", glassConfigBuffer);
+				((PostPassAccessor) pass).liquidum$getCustomUniforms().put("GlassConfig", buf);
 				hooked = true;
 				break;
 			}
@@ -1849,9 +2239,17 @@ public class LiquidGlassRenderer {
 
 	/** Write widget-derived panel rects (std140: vec4[N] + vec4 + int). */
 	private static void writePanelUniform(Minecraft mc, RenderTarget main) {
-		// Snapshot before early-outs, replay needs it every frame
-		snapshotElevTiles(mc);
-		if (glassConfigBuffer == null || glassConfigBuffer.isClosed()) {
+		writePanelUniform(mc, main, 0f);
+	}
+
+	private static void writePanelUniform(Minecraft mc, RenderTarget main, float plane) {
+		writePanelUniform(mc, main, plane, plane < 0.5f || plane > 1.5f, Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY);
+	}
+
+	// Upper run shares tiles but drops wells and panel, it samples their composite
+	private static void writePanelUniform(Minecraft mc, RenderTarget main, float plane, boolean withBase, float lo, float hi) {
+		GpuBuffer ubo = plane > 1.5f ? overlayBuffer() : (plane > 0.5f ? upperBuffer() : glassBuffer());
+		if (ubo == null || ubo.isClosed()) {
 			LiquidumMod.LOGGER.warn("[glass] EFFECT SKIP: uniform buffer missing/closed");
 			return;
 		}
@@ -1866,16 +2264,13 @@ public class LiquidGlassRenderer {
 		// Rise: tiles slide up a little while growing (easeOutCubic "выезд").
 		float rise = (1.0f - animP) * 8.0f * scale;
 		for (int i = 0; i < pendingCount; i++) {
-			// HUD tiles (hotbar etc.) never animate — opening chat must not
-			// rebuild the whole bar. Screen tiles scale 0.5→1.0 (never vanish
-			// completely, even if a screen re-inits mid-animation).
+			// HUD tiles never animate, screen tiles grow from half size
 			boolean animate = !(hudTilesFrom >= 0 && i >= hudTilesFrom);
 			float p = animate ? (0.5f + 0.5f * animP) : 1.0f;
 			float r = animate ? rise : 0.0f;
 			float hw = Math.max(2f, pendW[i] * 0.5f * scale) * p;
 			float hh = Math.max(2f, pendH[i] * 0.5f * scale) * p;
-			// Widget Y grows downward; framebuffer texCoord v=0 is the BOTTOM row,
-			// so mirror vertically.
+			// Widget Y grows downward; framebuffer texCoord v=0 is the BOTTOM row, so mirror vertically.
 			float cx = (pendX[i] + pendW[i] * 0.5f) * scale;
 			float cy = h - (pendY[i] + pendH[i] * 0.5f) * scale + r;
 			setRect(floats, i, cx, cy, hw, hh);
@@ -1892,7 +2287,7 @@ public class LiquidGlassRenderer {
 		float fresnel = LiquidumDebugState.fresnel;
 		float sharpnessMix = LiquidumDebugState.sharpnessMix;
 
-		try (var mapped = glassConfigBuffer.map(false, true)) {
+		try (var mapped = ubo.map(false, true)) {
 			ByteBuffer bb = mapped.data().order(ByteOrder.nativeOrder());
 			bb.asFloatBuffer().put(floats);
 			// uMats: parallel array right after uRects (std140 vec4 stride).
@@ -1904,8 +2299,7 @@ public class LiquidGlassRenderer {
 				bb.putFloat(matsOff + i * 16 + 12, mats[i * 4 + 3]);
 			}
 			int floatBytes = MAX_PANELS * 32 + MAX_WELLS * 3 * 16;   // tail after uWells
-			// uWells: 12 grid-дескрипторов × 3 vec4, конвертация gui → fb px
-			// (bottom-origin): центр ячейки [0][0], шаг со знаком −Y.
+			// uWells: 12 grid-дескрипторов × 3 vec4, конвертация gui → fb px (bottom-origin): центр ячейки [0][0], шаг со знаком −Y.
 			int wellsOff = MAX_PANELS * 32;
 			for (int wi = 0; wi < wellCount; wi++) {
 				int s = wi * 12;
@@ -1932,9 +2326,7 @@ public class LiquidGlassRenderer {
 			// uMeta.y = SDF fusion radius (0 = hard union).
 			bb.putFloat(floatBytes + 20,
 				LiquidumDebugState.fusion ? LiquidumDebugState.fusionRadius : 0f);
-			// uMeta.z = selected-slot ring centre Y (fb px, bottom-origin).
-			// uMeta.w = ring centre X — exponentially smoothed toward the target
-			// so the ring GLIDES between slots (iOS-style), -1 = hidden.
+			// uMeta ring centre with smoothed glide, -1 hides it
 			if (hudSelTargetX >= 0) {
 				long now = System.nanoTime();
 				if (hudSelX < 0 || hudSelNanos == 0L) {
@@ -1951,8 +2343,7 @@ public class LiquidGlassRenderer {
 			bb.putFloat(floatBytes + 24,
 				hudSelCenterYGui > 0 ? h - hudSelCenterYGui * scale : -1f);
 			bb.putFloat(floatBytes + 28, hudSelX);
-			// uRing = selected-slot ring half-size in fb px (scales with gui scale):
-			// hugs the 20x22 cell (half 10x11 gui) + 1px margin, thin crisp line.
+			// uRing = selected-slot ring half-size in fb px (scales with gui scale): hugs the 20x22 cell (half 10x11 gui) + 1px margin, thin crisp line.
 			int ringOff = floatBytes + 64;
 			bb.putFloat(ringOff, 11.0f * scale);
 			bb.putFloat(ringOff + 4, 12.0f * scale);
@@ -1964,12 +2355,10 @@ public class LiquidGlassRenderer {
 			bb.putFloat(gridOff + 4, 20.0f * scale);
 			bb.putFloat(gridOff + 8, hudGridX >= 0 ? 181.0f * scale : 0.0f);
 			bb.putFloat(gridOff + 12, 0.0f);
-			// uPanel = frosted container panel (centre xy + half wh, fb px, bottom-origin).
-			// Gated by an OPEN CONTAINER SCREEN: without this the last panel
-			// rect leaks into other screens (a ghost panel over the pause menu).
+			// uPanel gated by open container screen, no ghost panels elsewhere
 			boolean panelScreenOpen = mc.gui.screen() instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 			int panelOff = floatBytes + 96;
-			if (hudPanelArea > 0 && panelScreenOpen) {
+			if (withBase && hudPanelArea > 0 && panelScreenOpen) {
 				bb.putFloat(panelOff, (hudPanelX + hudPanelW * 0.5f) * scale);
 				bb.putFloat(panelOff + 4, h - (hudPanelY + hudPanelH * 0.5f) * scale);
 				bb.putFloat(panelOff + 8, hudPanelW * 0.5f * scale);
@@ -2004,11 +2393,11 @@ public class LiquidGlassRenderer {
 				bb.putFloat(animOff, 0f);
 				bb.putFloat(animOff + 4, 0f);
 			}
-		bb.putFloat(animOff + 8, com.liquidum.client.debug.LiquidumDebugState.domeHeight);
+		bb.putFloat(animOff + 8, 0f);
 		bb.putFloat(animOff + 12, 0f);
 		// uWellMeta = (wellCount, cookFill, tintStrength, sunSpec).
 		int wellMetaOff = floatBytes + 144;
-		bb.putFloat(wellMetaOff, wellCount);
+		bb.putFloat(wellMetaOff, withBase ? wellCount : 0);
 		bb.putFloat(wellMetaOff + 4, fxCook >= 0 ? fxCook : 0f);
 		bb.putFloat(wellMetaOff + 8, tintStrength);
 		bb.putFloat(wellMetaOff + 12, com.liquidum.client.debug.LiquidumDebugState.sunSpec);
@@ -2059,12 +2448,35 @@ public class LiquidGlassRenderer {
 		bb.putFloat(sunOff + 4, sunG);
 		bb.putFloat(sunOff + 8, sunB);
 		bb.putFloat(sunOff + 12, com.liquidum.client.debug.LiquidumDebugState.sunSpec);
-		// uBleed = (bodyBleed, edgeBleed, chroma, 0).
+		// uBleed = (bodyBleed, edgeBleed, chroma, plane).
 		int bleedOff = floatBytes + 256;
 		bb.putFloat(bleedOff, LiquidumDebugState.bodyBleed);
 		bb.putFloat(bleedOff + 4, LiquidumDebugState.edgeBleed);
 		bb.putFloat(bleedOff + 8, LiquidumDebugState.chroma);
-		bb.putFloat(bleedOff + 12, 0f);
+		bb.putFloat(bleedOff + 12, plane);
+		// uCut = overlay content cutouts, gui px to fb px bottom-origin
+		int cutOff = floatBytes + 272;
+		for (int i = 0; i < MAX_CUTS; i++) {
+			if (i < cutCount) {
+				int b = i * 4;
+				bb.putFloat(cutOff + i * 16, (cutRect[b] + cutRect[b + 2] * 0.5f) * scale);
+				// Cutout centre uses height magnitude, half height passes through
+				bb.putFloat(cutOff + i * 16 + 4, h - (cutRect[b + 1] + Math.abs(cutRect[b + 3]) * 0.5f) * scale);
+				bb.putFloat(cutOff + i * 16 + 8, cutRect[b + 2] * 0.5f * scale);
+				bb.putFloat(cutOff + i * 16 + 12, cutRect[b + 3] * 0.5f * scale);
+			} else {
+				bb.putFloat(cutOff + i * 16, 0f);
+				bb.putFloat(cutOff + i * 16 + 4, 0f);
+				bb.putFloat(cutOff + i * 16 + 8, 0f);
+				bb.putFloat(cutOff + i * 16 + 12, 0f);
+			}
+		}
+		// uLayer = upper run elevation window, raw gui elev floats
+		int layerOff = floatBytes + 528;
+		bb.putFloat(layerOff, lo);
+		bb.putFloat(layerOff + 4, hi);
+		bb.putFloat(layerOff + 8, LiquidumDebugState.edgeWidth);
+		bb.putFloat(layerOff + 12, com.liquidum.client.interaction.ButtonInteractionHandler.pressLevel());
 			int screenOff = floatBytes + 32; // after count's 16-byte slot
 			bb.putFloat(screenOff, w);
 			bb.putFloat(screenOff + 4, h);
@@ -2126,6 +2538,9 @@ public class LiquidGlassRenderer {
 			case 9 -> 13;
 			case 10 -> 14;
 			case 11 -> 15;
+			case 12 -> 16;
+			case 13 -> 17;
+			case 14 -> 18;
 			default -> base;
 		};
 	}
@@ -2200,12 +2615,7 @@ public class LiquidGlassRenderer {
 	}
 
 	public static void startAnimation(boolean open) {
-		// Open: tiles grow out of their centres (progress consumed in
-		// writePanelUniform). Close is instant — after Screen.removed() the GUI
-		// no longer extracts rects, so there is nothing to animate on.
-		// Replay ONLY when the screen INSTANCE changes: some screens re-init
-		// every second (rebuildWidgets), and a restart per init would keep the
-		// tiles at ~5% size — invisible — forever.
+		// Open animates tiles from centres, close is instant with nothing to animate
 		if (open) {
 			Object screen = Minecraft.getInstance().gui.screen();
 			if (screen == lastAnimatedScreen) return;
