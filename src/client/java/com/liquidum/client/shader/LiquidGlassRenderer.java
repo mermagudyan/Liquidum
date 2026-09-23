@@ -128,6 +128,25 @@ public class LiquidGlassRenderer {
 				syncTargetSize(chain, path, qw, qh);
 				continue;
 			}
+			// Overlay low-frequency fields mirror the base pyramid
+			if (path.equals("overlay_colorfield")) {
+				int cw = Math.max(1, (int)(main.width * 0.25f));
+				int ch = Math.max(1, (int)(main.height * 0.25f));
+				if (t.width != cw || t.height != ch) {
+					t.resize(cw, ch);
+				}
+				syncTargetSize(chain, path, cw, ch);
+				continue;
+			}
+			if (path.equals("overlay_deepfield")) {
+				int dw = Math.max(1, (int)(main.width * 0.125f));
+				int dh = Math.max(1, (int)(main.height * 0.125f));
+				if (t.width != dw || t.height != dh) {
+					t.resize(dw, dh);
+				}
+				syncTargetSize(chain, path, dw, dh);
+				continue;
+			}
 			// Blurred mip level for frost, quarter caused cubes on villager house
 			if (path.equals("blurred")) {
 				int qw = Math.max(1, (int)(main.width * 0.65f));
@@ -296,44 +315,64 @@ public class LiquidGlassRenderer {
 		return false;
 	}
 
-	// Sheets transmit over lower sheets, backing stays opaque
-	private static boolean isSheetMat(int m) {
-		return m == MAT_CONTROL || m == MAT_ACTIVE || m == MAT_DENSE;
+	// Upper sheets present above the base window this frame
+	public static boolean hasUpperSheets() {
+		if (upperLevelCount <= 0) return false;
+		float lo = upperLevels[0] - 0.001f;
+		for (int i = 0; i < pendingCount; i++) {
+			if (pendMat[i] == MAT_POPUP) continue;
+			if (!isSheetMat(pendMat[i]) || pendElev[i] <= lo) continue;
+			return true;
+		}
+		return false;
 	}
 
-	private static final float[] upperLevels = new float[4];
+	// Overlay runs for popups or upper sheets, levels recomputed fresh
+	public static boolean hasOverlayWork() {
+		computeUpperLevels();
+		return hasPopupTiles() || hasUpperSheets();
+	}
+
+	// Sheets transmit over lower sheets, backing and cells stay opaque
+	private static boolean isSheetMat(int m) {
+		return m == MAT_CONTROL || m == MAT_ACTIVE || m == MAT_DENSE
+			|| m == MAT_COMPANION || m == MAT_GROUP || m == MAT_CARD;
+	}
+
+	private static final float[] upperLevels = new float[8];
 	private static int upperLevelCount = 0;
 
-	// Stacked sheet elevations over lower sheets, capped runs, refreshed per frame
+	// Every sheet elevation above the lowest is its own optical plane
 	private static void computeUpperLevels() {
 		upperLevelCount = 0;
-		for (int i = 0; i < pendingCount && upperLevelCount < upperLevels.length; i++) {
+		float base = Float.POSITIVE_INFINITY;
+		for (int i = 0; i < pendingCount; i++) {
 			if (pendMat[i] == MAT_POPUP || !isSheetMat(pendMat[i])) continue;
-			for (int j = 0; j < pendingCount; j++) {
-				if (i == j || pendMat[j] == MAT_POPUP || !isSheetMat(pendMat[j])) continue;
-				if (pendElev[j] >= pendElev[i]) continue;
-				if (Math.abs(pendGrp[j] - pendGrp[i]) < 0.5f) continue;
-				int ox = Math.max(pendX[i], pendX[j]);
-				int ox1 = Math.min(pendX[i] + pendW[i], pendX[j] + pendW[j]);
-				int oy = Math.max(pendY[i], pendY[j]);
-				int oy1 = Math.min(pendY[i] + pendH[i], pendY[j] + pendH[j]);
-				if (ox1 - ox <= 5 || oy1 - oy <= 5) continue;
-				float e = pendElev[i];
-				boolean have = false;
-				for (int k = 0; k < upperLevelCount; k++) if (upperLevels[k] == e) { have = true; break; }
-				if (have) break;
-				int at = upperLevelCount;
-				while (at > 0 && upperLevels[at - 1] > e) { upperLevels[at] = upperLevels[at - 1]; at--; }
-				upperLevels[at] = e;
-				upperLevelCount++;
-				break;
+			base = Math.min(base, pendElev[i]);
+		}
+		if (!Float.isFinite(base)) return;
+		for (int i = 0; i < pendingCount; i++) {
+			if (pendMat[i] == MAT_POPUP || !isSheetMat(pendMat[i])) continue;
+			float e = pendElev[i];
+			if (e <= base + 0.001f) continue;
+			boolean have = false;
+			for (int k = 0; k < upperLevelCount; k++) {
+				if (Math.abs(upperLevels[k] - e) <= 0.001f) { have = true; break; }
 			}
+			if (have || upperLevelCount >= upperLevels.length) continue;
+			int at = upperLevelCount;
+			while (at > 0 && upperLevels[at - 1] > e) { upperLevels[at] = upperLevels[at - 1]; at--; }
+			upperLevels[at] = e;
+			upperLevelCount++;
 		}
 	}
 
-	/** Scissor union over popup tiles only, same pad as base. */
+	/** Scissor union over popup and upper tiles, same pad as base. */
 	private static int[] computeOverlayScissorUnion(RenderTarget main) {
-		if (!hasPopupTiles()) return null;
+		boolean popup = hasPopupTiles();
+		boolean upperWin = upperLevelCount > 0;
+		float upperLo = upperWin ? upperLevels[0] - 0.001f : Float.POSITIVE_INFINITY;
+		if (!popup && !upperWin) return null;
 		float fw = main.width;
 		float fh = main.height;
 		float scale = fw / Math.max(1f, (float) pendingGuiW);
@@ -342,7 +381,8 @@ public class LiquidGlassRenderer {
 		float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
 		boolean has = false;
 		for (int i = 0; i < pendingCount; i++) {
-			if (pendMat[i] != MAT_POPUP) continue;
+			if (pendMat[i] != MAT_POPUP
+				&& (!upperWin || !isSheetMat(pendMat[i]) || pendElev[i] <= upperLo)) continue;
 			float hw = pendW[i] * 0.5f * scale;
 			float hh = pendH[i] * 0.5f * scale;
 			float cx = (pendX[i] + pendW[i] * 0.5f) * scale;
@@ -394,8 +434,6 @@ public class LiquidGlassRenderer {
 	private static GpuBuffer glassConfigBuffer;
 	// Separate UBO per chain: vanilla closes bound buffers, sharing killed base after the first TAIL run
 	private static GpuBuffer overlayConfigBuffer;
-	// Upper glass run reuses the base chain with its own plane buffer
-	private static GpuBuffer upperConfigBuffer;
 
 	private static final int MAX_PANELS = 128;
 	/** Максимум GridWell-дескрипторов за кадр (12 сеток хватает для любого
@@ -403,7 +441,7 @@ public class LiquidGlassRenderer {
 	public static final int MAX_WELLS = 12;
 	// GlassConfig UBO layout: rects, mats, wells, cutouts, then param blocks
 	private static final int GLASS_CONFIG_BYTES =
-		MAX_PANELS * 16 * 2 + MAX_WELLS * 3 * 16 + 16 * 34;
+		MAX_PANELS * 16 * 2 + MAX_WELLS * 3 * 16 + 16 * 35;
 
 	/** Set true to dump the next screen's widget classes once (diagnostics). */
 	public static boolean dumpWidgetClasses = true;
@@ -558,11 +596,11 @@ public class LiquidGlassRenderer {
 	/** Book body rect (gui px) for tab bridging, reset every frame */
 	private static int bookX0 = 0, bookY0 = 0, bookX1 = -1, bookY1 = -1;
 
-	/** Recipe book body on layer 1, records its rect for the active tab bridge */
+	/** Recipe book body on layer 0 until content replay exists, records its rect for the active tab bridge */
 	public static void submitBookPanel(int x, int y, int w, int h) {
 		if (w <= 0 || h <= 0) return;
 		bookX0 = x; bookY0 = y; bookX1 = x + w; bookY1 = y + h;
-		appendRect(x, y, w, h, MAT_COMPANION, 1.0f, 1.0f);
+		appendRect(x, y, w, h, MAT_COMPANION, 0.0f, 1.0f);
 	}
 
 	/** Right-edge extension so the active tab lands solid inside the book */
@@ -672,11 +710,13 @@ public class LiquidGlassRenderer {
 		drawingBookIcon = true;
 		lastRecipeBookX = x; lastRecipeBookY = y; lastRecipeBookW = w; lastRecipeBookH = h;
 		try {
-			// iPhone: верстак/книга — часть системы, не отдельная карточка, inset 2px
-			submitSpriteTile(x + 2, y + 2, w - 4, h - 4, MAT_CONTROL);
+			// Full rect stays readable around the 16px glyph
+			submitSpriteTile(x, y, w, h, MAT_CONTROL);
 			int cx = x + (w - 16) / 2;
 			int cy = y + (h - 16) / 2;
-			g.item(new ItemStack(Items.BOOK), cx, cy, 0);
+			// Glyph replays above glass like tab icons, direct draw only when deferral is off
+			if (deferForeground()) deferTabIcon(new ItemStack(Items.BOOK), cx, cy, 0);
+			else g.item(new ItemStack(Items.BOOK), cx, cy, 0);
 		} finally {
 			drawingBookIcon = false;
 		}
@@ -780,11 +820,17 @@ public class LiquidGlassRenderer {
 		if (deferredSprites.isEmpty() && deferredBlits.isEmpty() && deferredBlits9.isEmpty() && deferredTabIcons.isEmpty() && deferredTexts.isEmpty() && deferredSeqTexts.isEmpty() && pendingMapDraw == null && deferredHudItems.isEmpty() && deferredHudDecor.isEmpty()) return;
 		boolean canFg = deferForeground();
 		boolean canHud = !deferredHudItems.isEmpty() || !deferredHudDecor.isEmpty();
-		if (!canFg && !canHud) {
+		boolean canText = enabled;
+		if (!canFg && !canHud && !canText) {
 			deferredSprites.clear(); deferredBlits.clear(); deferredBlits9.clear(); deferredTabIcons.clear(); deferredTexts.clear();
 			deferredSeqTexts.clear(); pendingMapDraw = null;
 			deferredHudItems.clear(); deferredHudDecor.clear();
 			return;
+		}
+		if (!canFg && !canHud) {
+			deferredSprites.clear(); deferredBlits.clear(); deferredBlits9.clear(); deferredTabIcons.clear();
+			pendingMapDraw = null;
+			deferredHudItems.clear(); deferredHudDecor.clear();
 		}
 		boolean old = inForegroundReplay;
 		inForegroundReplay = true;
@@ -817,8 +863,8 @@ public class LiquidGlassRenderer {
 			if (clipHudUnderButtons() && isUnderElevatedTile(ix, iy, 16, 16)) continue;
 			g.item((net.minecraft.world.entity.LivingEntity) a[0], (net.minecraft.world.item.ItemStack) a[1], (Integer) a[2], (Integer) a[3], (Integer) a[4]);
 		}
-			if (canFg && (!deferredTexts.isEmpty() || !deferredSeqTexts.isEmpty())) LiquidumLayers.beginText(g);
-			if (canFg) {
+		if (canText && (!deferredTexts.isEmpty() || !deferredSeqTexts.isEmpty())) LiquidumLayers.beginText(g);
+		if (canText) {
 			for (Object[] a : deferredTexts) {
 				g.text((net.minecraft.client.gui.Font) a[0], (net.minecraft.network.chat.Component) a[1], (Integer) a[2], (Integer) a[3], (Integer) a[4], (Boolean) a[5]);
 			}
@@ -1452,8 +1498,15 @@ public class LiquidGlassRenderer {
 		pendMat[pendingCount] = mat;
 		pendElev[pendingCount] = elev;
 		pendGrp[pendingCount] = group;
-		pendShapeW[pendingCount] = shapeW;
+		pendShapeW[pendingCount] = semanticShape(mat, shapeW);
 		pendingCount++;
+	}
+	// Semantic surfaces, never framebuffer-size auto-detect
+	private static float semanticShape(int mat, float shapeW) {
+		float sid = (float) Math.floor(shapeW + 0.0001);
+		if (sid > 0.5 || shapeW - sid >= 0.25) return shapeW;
+		if (mat == MAT_BASE || mat == MAT_COMPANION || mat == MAT_GROUP || mat == MAT_CARD || mat == MAT_POPUP) return 5f;
+		return shapeW;
 	}
 	private static int debugCount = 0;
 
@@ -1595,12 +1648,21 @@ public class LiquidGlassRenderer {
 	private static final int[] elevY = new int[ELEV_MAX];
 	private static final int[] elevW = new int[ELEV_MAX];
 	private static final int[] elevH = new int[ELEV_MAX];
+	private static final float[] elevE = new float[ELEV_MAX];
+	private static final int OWNER_MAX = 128;
+	private static final int[] ownerX = new int[OWNER_MAX];
+	private static final int[] ownerY = new int[OWNER_MAX];
+	private static final int[] ownerW = new int[OWNER_MAX];
+	private static final int[] ownerH = new int[OWNER_MAX];
+	private static final float[] ownerE = new float[OWNER_MAX];
+	private static int ownerCount = 0;
 	private static int elevCount = 0;
 	private static String elevScreen = "";
 
 	/** Snapshot button tiles once the full frame's batch is known (draw time). */
 	private static void snapshotElevTiles(Minecraft mc) {
 		elevCount = 0;
+		ownerCount = 0;
 		String cls = "";
 		try {
 			var s = mc.gui.screen();
@@ -1616,13 +1678,22 @@ public class LiquidGlassRenderer {
 			elevY[elevCount] = pendY[i];
 			elevW[elevCount] = pendW[i];
 			elevH[elevCount] = pendH[i];
+			elevE[elevCount] = pendElev[i];
 			elevCount++;
+		}
+		for (int i = 0; i < pendingCount && ownerCount < OWNER_MAX; i++) {
+			if (pendW[i] <= 0 || pendH[i] <= 0) continue;
+			ownerX[ownerCount] = pendX[i];
+			ownerY[ownerCount] = pendY[i];
+			ownerW[ownerCount] = pendW[i];
+			ownerH[ownerCount] = pendH[i];
+			ownerE[ownerCount] = pendElev[i];
+			ownerCount++;
 		}
 	}
 
 	// Fail-open on screen change, stale tiles never erase items
-	public static boolean isUnderElevatedTile(int x, int y, int w, int h) {
-		if (!enabled) return false;
+	public static boolean isUnderElevatedTile(int x, int y, int w, int h) {		if (!enabled) return false;
 		if (elevCount == 0 || w <= 0 || h <= 0) return false;
 		String cls = "";
 		try {
@@ -1637,6 +1708,78 @@ public class LiquidGlassRenderer {
 			if (x < x1 && x + w > x0 && y < y1 && y + h > y0) return true;
 		}
 		return false;
+	}
+	// Owner elevation for a text point, previous frame snapshot, -1 when homeless
+	public static float ownerElevFor(int x, int y) {
+		if (!enabled || ownerCount == 0) return -1f;
+		String cls = "";
+		try {
+			var s = Minecraft.getInstance().gui.screen();
+			if (s != null) cls = s.getClass().getName();
+		} catch (Exception ignored) {}
+		if (!elevScreen.equals(cls)) return -1f;
+		float owner = -1f;
+		for (int i = 0; i < ownerCount; i++) {
+			int x0 = ownerX[i], y0 = ownerY[i];
+			int x1 = x0 + ownerW[i], y1 = y0 + ownerH[i];
+			if (x1 <= x0 || y1 <= y0) continue;
+			if (x >= x0 && x < x1 && y >= y0 && y < y1) owner = ownerE[i];
+		}
+		return owner;
+	}
+
+	// Per-plane text stash, replayed sharp after its own glass like popup rows
+	private static final java.util.List<Object[]> planeTexts = new java.util.ArrayList<>();
+
+	public static boolean hasPlaneTexts() {
+		return !planeTexts.isEmpty();
+	}
+
+	public static boolean stashPlaneText(net.minecraft.client.gui.Font font,
+	                                     net.minecraft.util.FormattedCharSequence seq,
+	                                     org.joml.Matrix3x2f pose,
+	                                     int x, int y, int color, boolean shadow, float owner) {
+		if (planeTexts.size() >= 128 || font == null || seq == null || pose == null) return false;
+		planeTexts.add(new Object[]{ font, seq, new org.joml.Matrix3x2f(pose), x, y, color, shadow, owner });
+		return true;
+	}
+
+	// Covered by a strictly higher sheet, popup glass excluded by design
+	private static boolean coveredByHigher(int x, int y, float owner) {
+		for (int i = 0; i < pendingCount; i++) {
+			if (pendMat[i] == MAT_POPUP) continue;
+			if (pendElev[i] <= owner + 0.001f) continue;
+			int x0 = pendX[i], y0 = pendY[i];
+			if (x >= x0 && x < x0 + pendW[i] && y >= y0 && y < y0 + pendH[i]) return true;
+		}
+		return false;
+	}
+
+	// Late overlay point owns these, same mesh surgery as popup replay
+	public static int submitPlaneReplay(net.minecraft.client.renderer.state.gui.GuiRenderState state) {
+		int n = 0;
+		boolean opened = false;
+		for (Object[] r : planeTexts) {
+			int x = (Integer) r[3], y = (Integer) r[4];
+			float owner = (Float) r[7];
+			if (coveredByHigher(x, y, owner)) continue;
+			if (!opened) { state.nextStratum(); opened = true; }
+			final org.joml.Matrix3x2f pose = (org.joml.Matrix3x2f) r[2];
+			var st = new net.minecraft.client.renderer.state.gui.GuiTextRenderState(
+				(net.minecraft.client.gui.Font) r[0], (net.minecraft.util.FormattedCharSequence) r[1], pose,
+				x, y, (Integer) r[5],
+				0, (Boolean) r[6], false, null);
+			var prepared = st.ensurePrepared();
+			state.addText(st);
+			prepared.visit(new net.minecraft.client.gui.Font.GlyphVisitor() {
+				@Override
+				public void acceptRenderable(net.minecraft.client.gui.font.TextRenderable renderable) {
+					state.addGlyphToCurrentLayer(new net.minecraft.client.renderer.state.gui.GlyphRenderState(pose, renderable, null));
+				}
+			});
+			n++;
+		}
+		return n;
 	}
 	// Options sheets keep HUD items visible, Done stays above via strata order
 	public static boolean clipHudUnderButtons() {
@@ -1775,7 +1918,8 @@ public class LiquidGlassRenderer {
 		for (int[] r : rects) {
 			int mat = r.length >= 5 ? r[4] : MAT_CONTROL;
 			float grp = r.length >= 6 ? (float) r[5] : 0f;
-			appendRect(r[0], r[1], r[2], r[3], mat, 2f, grp);
+			// Base plane until content replay exists, upper sheets would refract own text
+			appendRect(r[0], r[1], r[2], r[3], mat, 0f, grp);
 		}
 		snapshotElevTiles(Minecraft.getInstance());
 	}
@@ -1801,6 +1945,7 @@ public class LiquidGlassRenderer {
 		deferredTexts.clear();
 		popupReplayTexts.clear();
 		popupReplayChecks.clear();
+		planeTexts.clear();
 		deferredHudItems.clear();
 		deferredHudDecor.clear();
 		iconKeyCount = 0;
@@ -2014,14 +2159,7 @@ public class LiquidGlassRenderer {
 			}
 		consecutiveErrors = 0;
 		logFrame(LiquidumDebugState.mode, pendingCount, true, "ran");
-
-		for (int k = 0; k < upperLevelCount; k++) {
-			float hi = k == upperLevelCount - 1 ? Float.POSITIVE_INFINITY : upperLevels[k];
-			float lo = k == 0 ? upperLevels[0] - 0.001f : upperLevels[k - 1];
-			runUpperPass(mc, main, chain, lo, hi);
-		}
-
-
+		// Upper sheets run at TAIL over the finished scene (plane 3).
 			boolean dbg = DEBUG && (debugCount < 3 || debugCount % 600 == 0);
 			if (dbg) LiquidumMod.LOGGER.info("[glass] postchain #{}: main={}x{} glassout={}x{} out={}",
 				debugCount, main.width, main.height,
@@ -2039,53 +2177,13 @@ public class LiquidGlassRenderer {
 		debugCount++;
 	}
 
-	/** Second base run: raised tiles sample the lower composite, glass over glass. */
-	private static float lastUpperLo = Float.NaN, lastUpperHi = Float.NaN;
-	private static int lastUpperInWindow = -1, lastUpperPend = -1;
-	private static void runUpperPass(Minecraft mc, RenderTarget main, PostChain chain, float lo, float hi) {
-		try {
-			hookUpperUniform(chain);
-			writePanelUniform(mc, main, 1f, false, lo, hi);
-			int[] scissor = computeScissorUnion(main);
-			boolean scissorOn = false;
-			if (scissor != null) {
-				try {
-					GlStateManager._enableScissorTest();
-					GlStateManager._scissorBox(scissor[0], scissor[1], scissor[2], scissor[3]);
-					scissorOn = true;
-				} catch (Throwable t) {
-					LiquidumMod.LOGGER.warn("[glass] upper scissor failed: {}", t.toString());
-				}
-			}
-			try {
-				chain.process(main, GraphicsResourceAllocator.UNPOOLED);
-			} finally {
-				if (scissorOn) {
-					try { GlStateManager._disableScissorTest(); } catch (Throwable ignored) {}
-				}
-			}
-			if (DEBUG) {
-				int inWindow = 0;
-				for (int i = 0; i < pendingCount; i++) {
-					if (pendMat[i] != MAT_POPUP && isSheetMat(pendMat[i]) && pendElev[i] > lo && pendElev[i] <= hi) inWindow++;
-				}
-				if (lo != lastUpperLo || hi != lastUpperHi || inWindow != lastUpperInWindow || pendingCount != lastUpperPend) {
-					lastUpperLo = lo;
-					lastUpperHi = hi;
-					lastUpperInWindow = inWindow;
-					lastUpperPend = pendingCount;
-					LiquidumMod.LOGGER.info("[glass] upper pass lo={} hi={} inWindow={} pend={}", lo, hi, inWindow, pendingCount);
-				}
-			}
-		} catch (Throwable t) {
-			LiquidumMod.LOGGER.error("[glass] upper process failed", t);
-		}
-	}
-
-	// TAIL composite over the finished scene: popup samples baseScene, cutouts keep own text sharp.
+	// TAIL composite over the finished scene: popup and upper sheets sample it, cutouts keep own text sharp.
 	public static void renderOverlayPostChain() {
 		if (!enabled) return;
-		if (!hasPopupTiles()) return;
+		computeUpperLevels();
+		boolean popup = hasPopupTiles();
+		boolean upper = hasUpperSheets();
+		if (!popup && !upper) return;
 		Minecraft mc = Minecraft.getInstance();
 		if (mc.gui == null || mc.gui.overlay() != null) return;
 		if (!initialized || errored || mc.gameRenderer == null) return;
@@ -2096,24 +2194,19 @@ public class LiquidGlassRenderer {
 		try {
 			resolveGlassOutput(chain, main);
 			hookOverlayUniform(chain);
-			writePanelUniform(mc, main, 2f);
-			int[] scissor = computeOverlayScissorUnion(main);
-			boolean scissorOn = false;
-			if (scissor != null) {
-				try {
-					GlStateManager._enableScissorTest();
-					GlStateManager._scissorBox(scissor[0], scissor[1], scissor[2], scissor[3]);
-					scissorOn = true;
-				} catch (Throwable t) {
-					LiquidumMod.LOGGER.warn("[glass] overlay scissor failed: {}", t.toString());
+			if (upper) {
+				for (int k = 0; k < upperLevelCount; k++) {
+					float e = upperLevels[k];
+					GpuBuffer levelBuf = overlayLevelBuffer(k);
+					hookGlassUniformInto(chain, levelBuf);
+					writePanelUniform(mc, main, 3f, false, e - 0.001f, e + 0.001f, levelBuf);
+					runOverlayOnce(main, chain);
 				}
 			}
-			try {
-				chain.process(main, GraphicsResourceAllocator.UNPOOLED);
-			} finally {
-				if (scissorOn) {
-					try { GlStateManager._disableScissorTest(); } catch (Throwable ignored) {}
-				}
+			if (popup) {
+				hookGlassUniformInto(chain, overlayBuffer());
+				writePanelUniform(mc, main, 2f);
+				runOverlayOnce(main, chain);
 			}
 			if (cutCount != lastCutLogged) {
 				lastCutLogged = cutCount;
@@ -2125,10 +2218,34 @@ public class LiquidGlassRenderer {
 				}
 			}
 			if (DEBUG && debugCount % 600 == 0) {
-				LiquidumMod.LOGGER.info("[glass] overlay ran pend={}", pendingCount);
+				StringBuilder lsb = new StringBuilder("[glass] overlay ran pend=").append(pendingCount).append(" upper=").append(upperLevelCount);
+				for (int k = 0; k < upperLevelCount; k++) lsb.append(String.format(java.util.Locale.ROOT, " %.2f", upperLevels[k]));
+				LiquidumMod.LOGGER.info(lsb.toString());
 			}
 		} catch (Throwable t) {
 			LiquidumMod.LOGGER.error("[glass] overlay process failed", t);
+		}
+	}
+
+	// One overlay chain run with tile-union scissor, shared by popup and upper passes
+	private static void runOverlayOnce(RenderTarget main, PostChain chain) {
+		int[] scissor = computeOverlayScissorUnion(main);
+		boolean scissorOn = false;
+		if (scissor != null) {
+			try {
+				GlStateManager._enableScissorTest();
+				GlStateManager._scissorBox(scissor[0], scissor[1], scissor[2], scissor[3]);
+				scissorOn = true;
+			} catch (Throwable t) {
+				LiquidumMod.LOGGER.warn("[glass] overlay scissor failed: {}", t.toString());
+			}
+		}
+		try {
+			chain.process(main, GraphicsResourceAllocator.UNPOOLED);
+		} finally {
+			if (scissorOn) {
+				try { GlStateManager._disableScissorTest(); } catch (Throwable ignored) {}
+			}
 		}
 	}
 
@@ -2185,11 +2302,6 @@ public class LiquidGlassRenderer {
 		hookGlassUniformInto(chain, overlay ? overlayBuffer() : glassBuffer());
 	}
 
-	// Upper run binds its own plane buffer into the same glass pass
-	private static void hookUpperUniform(PostChain chain) {
-		hookGlassUniformInto(chain, upperBuffer());
-	}
-
 	private static GpuBuffer glassBuffer() {
 		GpuDevice device = RenderSystem.getDevice();
 		if (glassConfigBuffer == null || glassConfigBuffer.isClosed()) {
@@ -2208,13 +2320,15 @@ public class LiquidGlassRenderer {
 		return overlayConfigBuffer;
 	}
 
-	private static GpuBuffer upperBuffer() {
+	private static final GpuBuffer[] overlayLevelBuffers = new GpuBuffer[8];
+
+	private static GpuBuffer overlayLevelBuffer(int level) {
 		GpuDevice device = RenderSystem.getDevice();
-		if (upperConfigBuffer == null || upperConfigBuffer.isClosed()) {
-			upperConfigBuffer = device.createBuffer(() -> "liquidum upper config",
+		if (overlayLevelBuffers[level] == null || overlayLevelBuffers[level].isClosed()) {
+			overlayLevelBuffers[level] = device.createBuffer(() -> "liquidum overlay level " + level,
 				GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE | GpuBuffer.USAGE_COPY_DST, GLASS_CONFIG_BYTES);
 		}
-		return upperConfigBuffer;
+		return overlayLevelBuffers[level];
 	}
 
 	private static void hookGlassUniformInto(PostChain chain, GpuBuffer buf) {
@@ -2248,7 +2362,11 @@ public class LiquidGlassRenderer {
 
 	// Upper run shares tiles but drops wells and panel, it samples their composite
 	private static void writePanelUniform(Minecraft mc, RenderTarget main, float plane, boolean withBase, float lo, float hi) {
-		GpuBuffer ubo = plane > 1.5f ? overlayBuffer() : (plane > 0.5f ? upperBuffer() : glassBuffer());
+		writePanelUniform(mc, main, plane, withBase, lo, hi, plane > 1.5f ? overlayBuffer() : glassBuffer());
+	}
+
+	// One snapshot buffer per upper optical plane, passes never share state
+	private static void writePanelUniform(Minecraft mc, RenderTarget main, float plane, boolean withBase, float lo, float hi, GpuBuffer ubo) {
 		if (ubo == null || ubo.isClosed()) {
 			LiquidumMod.LOGGER.warn("[glass] EFFECT SKIP: uniform buffer missing/closed");
 			return;
@@ -2477,6 +2595,11 @@ public class LiquidGlassRenderer {
 		bb.putFloat(layerOff + 4, hi);
 		bb.putFloat(layerOff + 8, LiquidumDebugState.edgeWidth);
 		bb.putFloat(layerOff + 12, com.liquidum.client.interaction.ButtonInteractionHandler.pressLevel());
+		// uRefl = face reflection (strength, width pow, tint mix, sharp boost)
+		bb.putFloat(layerOff + 16, LiquidumDebugState.reflection);
+		bb.putFloat(layerOff + 20, 2.0f);
+		bb.putFloat(layerOff + 24, 0.55f);
+		bb.putFloat(layerOff + 28, 1.0f);
 			int screenOff = floatBytes + 32; // after count's 16-byte slot
 			bb.putFloat(screenOff, w);
 			bb.putFloat(screenOff + 4, h);
@@ -2494,9 +2617,14 @@ public class LiquidGlassRenderer {
 		}
 
 		if (DEBUG && (count != lastLoggedCount)) {
+			float eMin = Float.POSITIVE_INFINITY, eMax = Float.NEGATIVE_INFINITY;
+			for (int i = 0; i < count; i++) {
+				eMin = Math.min(eMin, pendElev[i]);
+				eMax = Math.max(eMax, pendElev[i]);
+			}
 			StringBuilder sb = new StringBuilder(String.format(
-				"[glass] EFFECT(%d): tiles=%d gui=%dx%d scale=%.2f animP=%.2f",
-				debugCount, count, pendingGuiW, pendingGuiH, scale, openProgress()));
+				"[glass] EFFECT(%d): tiles=%d gui=%dx%d scale=%.2f animP=%.2f elev=[%.2f,%.2f] upper=%d",
+				debugCount, count, pendingGuiW, pendingGuiH, scale, openProgress(), eMin, eMax, upperLevelCount));
 			int shown = Math.min(count, 6);
 			for (int i = 0; i < shown; i++) {
 				sb.append(String.format(" | #%d[%.0f,%.0f %.0fx%.0f]",
@@ -2541,6 +2669,7 @@ public class LiquidGlassRenderer {
 			case 12 -> 16;
 			case 13 -> 17;
 			case 14 -> 18;
+			case 15 -> 19;
 			default -> base;
 		};
 	}

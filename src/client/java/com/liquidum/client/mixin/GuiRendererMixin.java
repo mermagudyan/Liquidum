@@ -20,12 +20,13 @@ public abstract class GuiRendererMixin {
 		var draws = liquidum$getDraws();
 		LiquidGlassRenderer.replayCap = draws.size();
 		LiquidGlassRenderer.replayStart = -1;
-		if (!LiquidGlassRenderer.hasPopupReplay()) return;
+		if (!LiquidGlassRenderer.hasPopupReplay() && !LiquidGlassRenderer.hasPlaneTexts()) return;
 		try {
 			int s0 = draws.size();
 			int firstDraw = liquidum$getFirstDrawIndexAfterBlur();
+			LiquidGlassRenderer.submitPlaneReplay(liquidum$getRenderState());
 			int added = LiquidGlassRenderer.submitPopupReplay(liquidum$getRenderState());
-			if (added <= 0) return;
+			if (added <= 0 && !LiquidGlassRenderer.hasPlaneTexts()) return;
 			// Re-mesh repeats old draws deterministically, ours append last
 			liquidum$meshRange(net.minecraft.client.renderer.state.gui.GuiRenderState.TraverseRange.AFTER_BLUR);
 			LiquidGlassRenderer.replayStart = 2 * s0 - firstDraw;
@@ -44,7 +45,7 @@ public abstract class GuiRendererMixin {
 	@Inject(method = "render()V", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/StagedVertexBuffer;endDraw()V"))
 	private void liquidum$lateOverlay(CallbackInfo ci) {
 		try {
-			if (LiquidGlassRenderer.hasPopupTiles()) {
+			if (LiquidGlassRenderer.hasOverlayWork()) {
 				LiquidGlassRenderer.renderOverlayPostChain();
 			}
 		} catch (Exception ignored) {

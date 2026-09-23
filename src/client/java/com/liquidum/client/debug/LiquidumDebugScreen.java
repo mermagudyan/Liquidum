@@ -86,7 +86,7 @@ public class LiquidumDebugScreen extends Screen {
 		addNumericRow(x, y, w, "ProbeSize", () -> LiquidumDebugState.probeDiameter, v -> LiquidumDebugState.probeDiameter = v, 32f, 400f, 8f, 120f); y += ROW_H;
 
 		addNumericRow(x, y, w, "CornerRadius", () -> LiquidumDebugState.cornerRadiusFraction, v -> LiquidumDebugState.cornerRadiusFraction = v, 0f, 1f, 0.05f, 0.28f); y += ROW_H;
-		addNumericRow(x, y, w, "Refraction", () -> LiquidumDebugState.refraction, v -> LiquidumDebugState.refraction = v, 0f, 200f, 5f, 20f); y += ROW_H;
+		addNumericRow(x, y, w, "Refraction", () -> LiquidumDebugState.refraction, v -> LiquidumDebugState.refraction = v, 0f, 200f, 5f, 30f); y += ROW_H;
 		addNumericRow(x, y, w, "Fresnel", () -> LiquidumDebugState.fresnel, v -> LiquidumDebugState.fresnel = v, 0f, 5f, 0.1f, 0.65f); y += ROW_H;
 		addNumericRow(x, y, w, "SharpnessMix", () -> LiquidumDebugState.sharpnessMix, v -> LiquidumDebugState.sharpnessMix = v, 0f, 1f, 0.05f, 0.14f); y += ROW_H;
 		addNumericRow(x, y, w, "FrostRadius(blur)", () -> LiquidumDebugState.frostRadius, v -> LiquidumDebugState.frostRadius = v, 0f, 30f, 1f, 7f); y += ROW_H;

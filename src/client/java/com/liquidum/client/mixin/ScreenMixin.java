@@ -71,6 +71,8 @@ public class ScreenMixin {
 			}
 			// Recipe tabs carry their own sprite tile with selected state
 			if (listener.getClass().getName().contains("recipebook.")) continue;
+			// Recipe book toggle carries its own sprite tile plus replayed glyph
+			if (listener instanceof AbstractWidget w && com.liquidum.client.shader.LiquidGlassRenderer.isRecipeBookButton(w)) continue;
 			if (listener instanceof net.minecraft.client.gui.components.PlainTextButton) continue;
 			if (!(listener instanceof AbstractButton) && !(listener instanceof AbstractSliderButton)) continue;
 			AbstractWidget widget = (AbstractWidget) listener;

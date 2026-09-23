@@ -31,6 +31,7 @@ layout(std140) uniform GlassConfig {
     vec4 uBleed;    // (bodyBleed, edgeBleed, chroma, plane: 0 base, 1 upper glass, 2 popup)
     vec4 uCut[16];     // overlay content cutouts (center xy, half wh), fb px
     vec4 uLayer;    // elevation window (lo, hi) plus edge lens width in z and press dent in w
+    vec4 uRefl;     // face reflection (strength, width pow, tint mix, sharp boost)
 };
 
 in vec2 texCoord;
@@ -49,7 +50,7 @@ float sdSquircle(vec2 p, vec2 b, float r) {
 float sdGlassBox(vec2 p, vec2 b, float r) {
     return (min(b.x,b.y) > 20.0) ? sdSquircle(p,b,r) : sdRoundedBox(p,b,r);
 }
-vec2 glassNormal(vec2 p, vec2 b, float r) {
+vec2 glassNormal(vec2 p, vec2 b, float r, bool squir) {
     vec2 q = abs(p) - b + r;
     // inside: closest side
     if (max(q.x, q.y) < 0.0) {
@@ -60,7 +61,7 @@ vec2 glassNormal(vec2 p, vec2 b, float r) {
     float l = length(m);
     if (l < 1e-4) return vec2(0.0, sign(p.y));
     // squircle uses its own L4 gradient, rounded direction would point elsewhere
-    if (min(b.x, b.y) > 20.0) {
+    if (squir) {
         vec2 g = vec2(m.x * m.x * m.x, m.y * m.y * m.y) * sign(p);
         if (dot(g, g) > 1e-8) return normalize(g);
     }
@@ -79,6 +80,21 @@ float sdTri(vec2 p, float r) {
 float smin(float a, float b, float k) {
     float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
     return mix(b, a, h) - k * h * (1.0 - h);
+}
+// Numeric SDF gradient for the optical normal: smooth across side/corner transitions where closest-side logic facets
+vec2 sdfGradN(vec2 p, vec2 b, float r, bool squir, vec2 fallback) {
+    float e = 0.75;
+    float dx;
+    float dy;
+    if (squir) {
+        dx = sdSquircle(p + vec2(e, 0.0), b, r) - sdSquircle(p - vec2(e, 0.0), b, r);
+        dy = sdSquircle(p + vec2(0.0, e), b, r) - sdSquircle(p - vec2(0.0, e), b, r);
+    } else {
+        dx = sdRoundedBox(p + vec2(e, 0.0), b, r) - sdRoundedBox(p - vec2(e, 0.0), b, r);
+        dy = sdRoundedBox(p + vec2(0.0, e), b, r) - sdRoundedBox(p - vec2(0.0, e), b, r);
+    }
+    vec2 g = vec2(dx, dy);
+    return dot(g, g) > 1e-6 ? normalize(g) : fallback;
 }
 
 // HUD icon halos: heart and drumstick SDF in unit space, rim follows the sprite
@@ -255,6 +271,8 @@ void main() {
     float topMin = 1e9;     // hard min within the top bucket, waist source
     int topCoverCount = 0;  // covering tiles inside the top bucket
     bool topFusable = false;
+    vec2 topFuseN = vec2(0.0, 1.0);
+    bool hasTopFuseN = false;
     int coverCountAll = 0; // solid non-slot tiles covering px, any layer
 
     // Материальные роли Liquidum: 0 BASE, 1 SLOT, 2 GROUP, 3 CONTROL, 4 COMPANION, 5 ACTIVE, 6 DENSE(HUD), 7 DOCK. Один материал — разные параметры.
@@ -267,10 +285,11 @@ void main() {
         float fgrp = uMats[i].z;
         // Plane split: base draws backing plus below-window sheets, upper its own slice, TAIL popup
         bool isPopup = abs(matId - 8.0) < 0.5;
-        if ((overlayPlane > 1.5) != isPopup) continue;
-        bool sheet = (matId > 2.5 && matId < 3.5) || (matId > 4.5 && matId < 5.5) || (matId > 5.5 && matId < 6.5);
-        if (overlayPlane < 0.5) { if (!isPopup && sheet && elev > uLayer.x) continue; }
+        bool sheet = (matId > 1.5 && matId < 2.5) || (matId > 2.5 && matId < 3.5) || (matId > 3.5 && matId < 4.5) || (matId > 4.5 && matId < 5.5) || (matId > 5.5 && matId < 6.5) || (matId > 8.5);
+        if (overlayPlane < 0.5) { if (isPopup) continue; if (sheet && elev > uLayer.x) continue; }
         else if (overlayPlane < 1.5) { if (isPopup || !sheet || elev <= uLayer.x || elev > uLayer.y) continue; }
+        else if (overlayPlane < 2.5) { if (!isPopup) continue; }
+        else { if (isPopup || !sheet || elev <= uLayer.x || elev > uLayer.y) continue; }
         bool dense = matId > 5.5 && matId < 6.5;           // MAT_DENSE
         bool dock = matId > 6.5 && matId < 7.5;             // MAT_DOCK
         bool popup = matId > 7.5 && matId < 8.5;            // MAT_POPUP boosted matte
@@ -288,7 +307,7 @@ void main() {
         bool isComp = matId > 3.5 && matId < 4.5;
         bool isDock = matId > 6.5 && matId < 7.5;
         float rCap = isDock ? max(uDockParams.y, 0.0) : min(16.0 * guiScale, min(halfSize.x, halfSize.y) * 0.35);
-        // Shape select from uMats w: integer part 0 box, 1 triangle, 2 circle. Fraction 0.0 keeps the legacy auto corner, else explicit 0..1.
+        // Shape select from uMats w: 0 box, 1 triangle, 2 circle, 5 squircle. Fraction 0.0 keeps the legacy auto corner, else explicit 0..1.
         float shapeW = uMats[i].w;
         float shapeId = floor(shapeW + 0.0001);
         float cornerF = shapeW - shapeId;
@@ -296,10 +315,13 @@ void main() {
         bool isCircle = shapeId > 1.5 && shapeId < 2.5;
         bool isHeart = shapeId > 2.5 && shapeId < 3.5;
         bool isMeat = shapeId > 3.5 && shapeId < 4.5;
+        bool isSquircle = shapeId > 4.5 && shapeId < 5.5;
         float cornerOv = cornerF < 0.25 ? -1.0 : clamp((cornerF - 0.5) / 0.499, 0.0, 1.0);
         float minHalf = min(halfSize.x, halfSize.y);
         float d;
         vec2 dir;
+        float boxR = 0.0;
+        bool boxLike = false;
         if (isCircle) {
             float rl = length(radial);
             d = rl - minHalf;
@@ -317,15 +339,25 @@ void main() {
             d = sdMeat(radial / minHalf) * minHalf;
             float rl = length(radial);
             dir = rl > 1e-3 ? radial / rl : vec2(0.0, 1.0);
+        } else if (isSquircle) {
+            float sqR;
+            if (cornerOv >= 0.0) sqR = cornerOv >= 0.98 ? minHalf : cornerOv * minHalf;
+            else sqR = min(16.0 * guiScale, minHalf * 0.35);
+            d = sdSquircle(radial, halfSize, sqR);
+            dir = glassNormal(radial, halfSize, sqR, true);
+            boxR = sqR; boxLike = true;
         } else {
             // Etalon pill reaches full capsule at the default fraction
             bool hero = (matId > 2.5 && matId < 3.5) || (matId > 4.5 && matId < 5.5);
             float cornerR;
             if (cornerOv >= 0.0) cornerR = cornerOv >= 0.98 ? minHalf : cornerOv * minHalf;
             else cornerR = hero ? minHalf * smoothstep(0.0, 0.18, uParams.x) : min(radF * minHalf, rCap);
-            d = sdGlassBox(radial, halfSize, cornerR);
-            dir = glassNormal(radial, halfSize, cornerR);
+            d = sdRoundedBox(radial, halfSize, cornerR);
+            dir = glassNormal(radial, halfSize, cornerR, false);
+            boxR = cornerR; boxLike = true;
         }
+        // Optical normal reads the SDF gradient near the edge: closest-side facets into sapphire at high refraction. Far tiles keep the cheap dir, smin weights them out anyway
+        if (boxLike && abs(d) < 16.0) dir = sdfGradN(radial, halfSize, boxR, isSquircle, dir);
         // Slot wells: interior must be CLEAR (no glass colour), only wall is glass (§22-23)
         if (slot) {
             float wWslot = 2.5 * guiScale;
@@ -354,8 +386,9 @@ void main() {
         if (slot) matFuse *= 0.62; // ~8.6 when fuseK=14 -> GridWell 8-9
         else if (matId > 1.5 && matId < 2.5) matFuse *= 0.82; // GROUP 11-13
         else if (matId > 3.5 && matId < 4.5) matFuse *= 0.92; // COMPANION large
-        // Book layer keeps legacy cross-height bridge, other layers melt inside one height only
-        bool bookGrp = abs(fgrp - 1.0) < 0.5;
+        float tileMinGui = min(halfSize.x, halfSize.y) / max(uRing.w / 4.0, 0.5);
+        matFuse *= clamp(tileMinGui / 20.0, 0.25, 1.0); // small tiles fuse tight, large sheets metaball
+        // Fusion melts inside one height only, elevation sets the optical plane
         // Solid cover claims pixels, slots stay clear holes under glass
         if (d < 0.0 && !slot) {
             coverCountAll++;
@@ -363,38 +396,52 @@ void main() {
                 topIdx = i; topD = d; topDir = dir; topReach = min(halfSize.x, halfSize.y);
                 topMat = matId; topElev = elev; topGrp = fgrp; topC = rect.xy; topHalf = halfSize;
                 topFused = d; topMin = d; topCoverCount = 1; topFusable = fusable;
+                topFuseN = dir; hasTopFuseN = true;
             } else {
                 bool sameLayer = abs(fgrp - topGrp) < 0.5;
                 bool sameHeight = abs(elev - topElev) <= 0.25;
-                bool bookPair = sameLayer && abs(topGrp - 1.0) < 0.5;
-                if (sameLayer && (sameHeight || bookPair) && fusable && topFusable) {
+                if (sameLayer && sameHeight && fusable && topFusable) {
                     topCoverCount++;
                     topMin = min(topMin, d);
                     if (matFuse > 0.0 && fuseK > 0.0) topFused = smin(topFused, d, min(matFuse, fuseK));
                     else topFused = min(topFused, d);
+                    vec2 fnbt = hasTopFuseN ? mix(dir, topFuseN, clamp(0.5 + 0.5 * (d - topFused) / max(min(matFuse, fuseK), 1e-3), 0.0, 1.0)) : dir;
+                    if (length(fnbt) > 1e-3) { topFuseN = normalize(fnbt); hasTopFuseN = true; }
                 } else if (elev > topElev + 0.25 || (abs(elev - topElev) <= 0.25 && i >= topIdx)) {
                     topIdx = i; topD = d; topDir = dir; topReach = min(halfSize.x, halfSize.y);
                     topMat = matId; topElev = elev; topGrp = fgrp; topC = rect.xy; topHalf = halfSize;
                     topFused = d; topMin = d; topCoverCount = 1; topFusable = fusable;
+                    topFuseN = dir; hasTopFuseN = true;
                 }
             }
         }
+        // Bucket halo fuses before physical overlap, same layer and height only
+        if (topIdx >= 0 && d >= 0.0 && !slot && fusable && topFusable
+            && abs(fgrp - topGrp) < 0.5 && abs(elev - topElev) <= 0.25
+            && matFuse > 0.0 && d < max(min(matFuse, fuseK), 1e-3) * 2.0) {
+            float fhk2 = max(min(matFuse, fuseK), 1e-3);
+            vec2 fnb2 = hasTopFuseN ? mix(dir, topFuseN, clamp(0.5 + 0.5 * (d - topFused) / fhk2, 0.0, 1.0)) : dir;
+            if (length(fnb2) > 1e-3) { topFuseN = normalize(fnb2); hasTopFuseN = true; }
+            topFused = smin(topFused, d, min(matFuse, fuseK));
+        }
         // dense/dock already iso, no fuse
-        dminFold = min(dminFold, d);
         if (dfold > 1e8) {
             dfold = d;
             isoFold = iso;
             foldElev = elev;
             foldGrp = fgrp;
+            dminFold = d;
             if (!iso) { fuseN = dir; hasFuseN = true; }
         } else if (!iso && !isoFold && matFuse > 0.0 && abs(fgrp - foldGrp) < 0.5
-            && (abs(elev - foldElev) <= 0.25 || (bookGrp && abs(foldGrp - 1.0) < 0.5))) {
+            && abs(elev - foldElev) <= 0.25) {
             float fhk = max(min(matFuse, fuseK), 1e-3);
             vec2 fnb = hasFuseN ? mix(dir, fuseN, clamp(0.5 + 0.5 * (d - dfold) / fhk, 0.0, 1.0)) : dir;
             if (length(fnb) > 1e-3) { fuseN = normalize(fnb); hasFuseN = true; }
             dfold = smin(dfold, d, matFuse);
+            dminFold = min(dminFold, d);
         } else {
-            if (!iso && d < dfold) { dfold = d; fuseN = dir; hasFuseN = true; }
+            // Retargeted bucket keeps its own group, height and hard min
+            if (!iso && d < dfold) { dfold = d; foldGrp = fgrp; foldElev = elev; dminFold = d; fuseN = dir; hasFuseN = true; }
             else dfold = min(dfold, d);
             isoFold = false;
         }
@@ -486,11 +533,14 @@ void main() {
         cardLevel = clamp(cardAcc / wsum, 0.0, 1.0);
     }
     // Covered pixels read the top layer only, buried edges stay hidden
+    // fuseW weighs the analytic smin gradient: singletons keep their own normal, melts bend as one surface
+    float fuseW = 0.0;
     if (topIdx >= 0) {
         bool topMelted = topCoverCount >= 2 && topFused < 1e8 && topMin < 1e8;
-        bestD = topMelted ? topFused : topD;
+        if (topFused < 1e8 && topMin < 1e8) fuseW = clamp((topMin - topFused) / 2.0, 0.0, 1.0);
+        bestD = topFused;
         bestDir = topDir;
-        if (topMelted && hasFuseN && length(fuseN) > 1e-3) bestDir = normalize(mix(topDir, fuseN, 0.7)); // fused surface bends as one
+        if (hasTopFuseN && length(topFuseN) > 1e-3 && fuseW > 0.001) bestDir = normalize(mix(topDir, topFuseN, fuseW));
         reach = max(topReach, 4.0);
         density = topMat > 5.5 && topMat < 6.5 ? 1.0 : 0.0;
         slotLevel = 0.0;
@@ -558,7 +608,11 @@ void main() {
     float minHalfGui = min(covH.x, covH.y) / guiScaleE;
     float sizeK = clamp((minHalfGui - 10.0) / 50.0, 0.0, 1.0);
     effDensity = clamp(effDensity + sizeK * 0.22, 0.0, 1.0);
-
+    // Upper diagnostic layer keeps lower passes outside its own tiles
+    if (overlayPlane > 2.5 && bestMask <= 0.001) {
+        fragColor = vec4(texture(InSampler, uv).rgb, 1.0);
+        return;
+    }
     // MODE 1: mask visualization (cyan glow = tiles).
     if (mode == 1) {
         fragColor = vec4(vec3(0.0, bestMask * 0.8, bestMask * 0.8), 1.0);
@@ -678,61 +732,52 @@ void main() {
         float coverDiff = topD - dNear;
         if (coverDiff > 0.5 && coverDiff < 6.0 && layFuse < 1e8) rimSDF = layFuse;
         else if (layFuse < 1e8 && layMin < 1e8 && (layMin - layFuse) > 0.3) rimSDF = layFuse;
+        // Halo-deepened bucket union draws its own rim for any group
+        if (topFused < 1e8 && topMin < 1e8 && (topMin - topFused) > 0.25) { rimSDF = topFused; layFuse = topFused; }
     }
     float edgeW = clamp(1.10 + 0.008 * reach + popupLevel * 1.2, 1.0, 2.6);
     float rimBand = smoothstep(-edgeW, -0.5, rimSDF) * (1.0 - smoothstep(-0.5, 1.2, rimSDF));
     // Inner edge sits over lower glass, outer edge over world
     float overGlass = (topIdx >= 0 && coverCountAll > topCoverCount) ? 1.0 : 0.0;
-    rimBand *= 1.0 - overGlass * 0.85;
-    // Bend lives in a size-following rim ring, centre stays flat at any size
-    // Edge lens: anuero bevel profile plus true Snell bend, outward sampling
+    float overGlassSuppress = mix(0.85, 0.20, clamp(controlLevel, 0.0, 1.0));
+    rimBand *= 1.0 - overGlass * overGlassSuppress;
+    rimBand *= 1.0 - fuseW * 0.35; // fused necks read as surface, not as edge
+    // Distance maps directly to source UV, rim only visualizes the surface
     float edgeWidthMul = clamp(uLayer.z, 0.25, 2.0);
-    float bevelWidthPx = clamp(minHalfGui * 0.35, 4.0, 9.0) * guiScaleE * edgeWidthMul;
-    float bevelX = clamp(max(-bestD, 0.0) / max(bevelWidthPx, 1.0), 0.0, 1.0);
-    float bevelU = 1.0 - bevelX;
-    float bevelH = pow(max(1.0 - bevelU * bevelU * bevelU * bevelU, 0.0), 0.25);
-    float bevelSlope = pow(bevelU / max(bevelH, 0.12), 3.0);
-    float tilt = atan(bevelSlope * 0.5);
-    float refrAng = asin(clamp(sin(tilt) / 1.5, 0.0, 1.0));
-    float edgeFactor = tan(max(tilt - refrAng, 0.0)) * bevelU;
-    float cosTheta = cos(tilt);
-    float fresnelS = 0.04 + 0.96 * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0); // Schlick, F0 air-glass
-    float slopeN = clamp(bevelSlope / 24.0, 0.0, 1.0); // 0 flat, 1 hard edge
-    // single linear gain, etalon 9 reads 1.0
+    float lensWidthPx = 5.25 * guiScaleE * edgeWidthMul;
+    float lensDepth = max(-bestD, 0.0);
+    float lensT = clamp(lensDepth / max(lensWidthPx, 1.0), 0.0, 1.0);
+    // Calm center without a microscopic spike at the rim
+    float lens = pow(1.0 - lensT, 2.15);
+    // Single linear gain, etalon 9 reads 1.0
     float refrK = clamp(uParams.y / 9.0, 0.0, 4.0);
-    float bodyRefrK = 0.08 * refrK;
-    float matteK = clamp(popupLevel + cardLevel, 0.0, 1.0); // EDGE-TINT bends almost nothing
-    float matRefraction = 7.8 * mix(0.45, 0.80, clamp(rimBand, 0.0, 1.0)); // peak bend lives at the rim, not inside
-    float refr = edgeFactor * (1.0 - slotLevel * 0.55); // bevel profile alone gates the bend
-    // Hover never bends glass: the highlight lives outside the distortion
-    refr *= (1.0 - matteK * 0.9) + bodyRefrK * 0.1 * (1.0 - matteK);
+    // Derivative of the same function, 0.36 x 2.15 = 0.774
+    float lensGrad = 0.774 * refrK * pow(max(1.0 - lensT, 0.0), 1.15);
+    float tilt = atan(lensGrad);
+    float cosTheta = cos(tilt);
+    float fresnelS = 0.04 + 0.96 * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+    float slopeN = clamp(lensGrad, 0.0, 1.0);
+    float matteK = clamp(popupLevel + cardLevel, 0.0, 1.0);
+    float maxDispPx = lensWidthPx * 0.36 * refrK;
+    float refr = lens * (1.0 - slotLevel * 0.55);
+    refr *= 1.0 - matteK * 0.9;
     // Внутри Well рефракция почти нулевая — это плоское углубление, не линза; hover-ячейка сохраняет чуть живой отклик.
     refr *= 1.0 - wellMask * (0.9 - wellHover * 0.4);
     // Solid fused core bends nothing: one flat glass, no directional seams. Top-bucket melt flattens its own interior, legacy groups keep their waist.
     if (topIdx >= 0 && bestD < -2.0) {
-        if (topMeltRim) refr *= 1.0 - clamp((topMin - topFused) / 2.0, 0.0, 1.0);
+        if (topMeltRim) refr *= 1.0 - fuseW;
         else {
             float cMin = abs(topGrp - 1.0) < 0.5 ? dmin1 : (abs(topGrp) < 0.5 ? dmin0 : 1e9);
             float cFuse = abs(topGrp - 1.0) < 0.5 ? dfuse1 : (abs(topGrp) < 0.5 ? dfuse0 : 1e9);
             if (cMin < 1e8 && cFuse < 1e8) refr *= 1.0 - clamp((cMin - cFuse) / 2.0, 0.0, 1.0);
+            refr *= 1.0 - fuseW * 0.7; // halo joint calms even outside the melted path
         }
     }
     // Geometric density (iOS model): thicker glass BENDS more — refraction scales with density instead of the material turning opaque.
     float concaveK = clamp(slotLevel + wellMask, 0.0, 1.0);
     // SDF surface normal drives the lens, radial centre vector only rescues degenerate pixels
+    // bestDir already carries the fused gradient, no second joint blend
     vec2 lensN = length(bestDir) > 1e-3 ? normalize(bestDir) : edgeN;
-    // Near a same-group joint, bend with the fused field so one object bends as one
-    if (topIdx >= 0 && concaveK < 0.5) {
-        float jTop = topMeltRim ? topMin : topD;
-        float jFuse = topMeltRim ? topFused : layFuse;
-        if (jFuse < 1e8) {
-            float jointK = clamp((jTop - jFuse) / 3.0, 0.0, 1.0);
-            if (jointK > 0.01) {
-                vec2 jn = mix(lensN, bestDir, jointK * 0.7);
-                if (length(jn) > 1e-3) lensN = normalize(jn);
-            }
-        }
-    }
     vec2 pressV = vec2(0.0);
     float pressDent = 0.0;
     float pressK = clamp(uLayer.w, 0.0, 1.0);
@@ -741,24 +786,27 @@ void main() {
         pressV = pxT - uScreen.zw;
         pressDent = exp(-dot(pressV, pressV) / (dentR * dentR)) * pressK;
     }
-    float elevRefK = topIdx >= 0 ? (1.0 + clamp(topElev, 0.0, 6.0) * 0.02) : 1.0; // taller glass bends harder
-    // Capsule ends work as round lenses, straights stay calmer
+    float elevRefK = topIdx >= 0 ? (1.0 + clamp(topElev, 0.0, 6.0) * 0.02) : 1.0;
     float capR = clamp(1.0 - min(covH.x, covH.y) / max(max(covH.x, covH.y), 1.0), 0.0, 1.0);
     vec2 capLoc = (pxT - covC) / max(covH, vec2(1.0));
     float capAlong = (covH.x >= covH.y) ? abs(capLoc.x) : abs(capLoc.y);
     float capRole = clamp(controlLevel + activeLevel, 0.0, 1.0);
-    float capMask = smoothstep(capR - 0.12, capR + 0.08, capAlong) * step(0.3, capR) * capRole; // true cap arc boundary
-    float capBoost = mix(1.0, 1.2, capMask);
-    vec2 edgeOffPx = lensN * (refr * (1.0 - pressDent * 0.45) * matRefraction * refrK * (1.0 + 0.42 * effDensity) * elevRefK * capBoost);
-    // iOS flow: convex samples inward (magnify), wells keep outward dip
+    float capMask = smoothstep(capR - 0.12, capR + 0.08, capAlong) * step(0.3, capR) * capRole;
+    float capBoost = 1.0;
+    vec2 edgeOffPx = lensN * (refr * (1.0 - pressDent * 0.45) * maxDispPx * (1.0 + 0.42 * effDensity) * elevRefK * capBoost);
     float distort = clamp(controlLevel + activeLevel, 0.0, 1.0);
     edgeOffPx = mix(-edgeOffPx * mix(0.35, 1.0, distort), -edgeOffPx * 0.9, concaveK);
     vec2 off = edgeOffPx / uScreen.xy;
     off += wellBend;
-    // REFR UV lens displacement as color
     if (mode == 11) {
         vec2 v = clamp(off * uScreen.xy * 0.25, -1.0, 1.0);
         fragColor = vec4(v * 0.5 + 0.5, 0.0, 1.0);
+        return;
+    }
+    if (mode == 19 && controlLevel > 0.5) {
+        vec2 testOff = -lensN * maxDispPx * lens / uScreen.xy;
+        vec3 testSrc = texture(InSampler, uvT + testOff).rgb;
+        fragColor = vec4(testSrc, 1.0);
         return;
     }
 
@@ -923,7 +971,8 @@ void main() {
         busyTileG = busyTile;
         float roleFrost = clamp(1.0 + compLevel * 0.35 + groupLevel * 0.20 + density * 0.30 - controlLevel * 0.10 + popupLevel * 0.5 + cardLevel * 0.8, 0.7, 1.8);
         float localFrost = max(frostEff * (1.0 - 0.25 * effDensity) * (1.0 - 0.30 * slotLevel) * (1.0 + busyTile * 0.8 + sizeK * 0.35 - (1.0 - sizeK) * 0.10) * (1.0 - overlayK * 0.45) * roleFrost, 1.0);
-        float isFlat = 1.0 - smoothstep(-10.0, -2.0, bestD);
+        localFrost *= 1.0 - lens * 0.48;
+        float isFlat = smoothstep(0.58, 1.0, lensT);
         // Edge reads narrower blur plus sharp return, interior keeps wide frost
         vec3 blurHalf = blur25Half(uvP + off, texelHalf, min(localFrost * 0.65, 1.5 + popupLevel * 2.2));
         vec3 blurMix = blurHalf;
@@ -933,17 +982,16 @@ void main() {
             blurMix = mix(blurFull, blurHalf, wideW);
         }
         body = mix(blurMix, panelBase, inPanel);
-        // Low frequency world color, stronger for large glass
         vec3 colorField = texture(ColorFieldSampler, uvP + off).rgb;
         float cfLuma = dot(colorField, vec3(0.2126, 0.7152, 0.0722));
         vec3 colorBlob = mix(vec3(cfLuma), colorField, 1.15 + 0.15 * sizeK);
-        body = mix(body, colorBlob, (0.16 + 0.020 * frostR + 0.24 * sizeK) * isFlat);
-        // Small controls keep the backdrop readable, large sheets keep atmosphere
-        // Deep flat color for large glass, pattern dies at 0.125x
+        float cfW = (0.14 + 0.016 * frostR + 0.18 * sizeK) * isFlat;
+        cfW *= 1.0 - controlLevel * 0.68;
+        body = mix(body, colorBlob, clamp(cfW, 0.0, 0.18));
         vec3 deepField = texture(DeepFieldSampler, uvP + off).rgb;
         float deepLuma = dot(deepField, vec3(0.2126, 0.7152, 0.0722));
         vec3 deepBlob = mix(vec3(deepLuma), deepField, 1.25);
-        float deepM = smoothstep(0.0, 0.3, sizeK) * isFlat;
+        float deepM = smoothstep(0.0, 0.3, sizeK) * isFlat * (1.0 - controlLevel);
         body = mix(body, deepBlob, min((0.20 + 0.030 * frostR) * deepM, 1.0));
         // Intrinsic veil: matte body of its own, dimmed world barely reads
         vec3 veilCol = mix(vec3(0.75), vec3(0.24), clamp(uTone.x, 0.0, 1.0));
@@ -953,8 +1001,8 @@ void main() {
         body = mix(body, texture(InSampler, uv).rgb, clamp(dockLevel, 0.0, 1.0) * (topMat > 6.5 && topMat < 7.5 ? 1.0 : 0.0));
     }
 
-    // Sharp lives at the rim only, flat centre stays frosted blobs
-    float sharpW = clamp(max(bestMask, wellMask) * (uParams.w * 0.6 + (frostOn ? 0.18 : 0.0)) * (0.25 + 0.75 * slopeN) + rimBand * (0.45 + 0.20 * capMask) + overlayK * 0.15 - busyTileG * 0.12 + pressDent * 0.15, 0.0, 1.0) * (1.0 - cardLevel * 0.9) * (1.0 - popupLevel * 0.7);
+    float edgeClarity = pow(clamp(lens, 0.0, 1.0), 1.10);
+    float sharpW = clamp(mix(0.015, 0.72, edgeClarity) * max(bestMask, wellMask) + rimBand * (0.28 + 0.18 * capMask) + overlayK * 0.15 - busyTileG * 0.12 + pressDent * 0.15, 0.0, 1.0) * (1.0 - cardLevel * 0.9) * (1.0 - popupLevel * 0.7);
     // Popup suppresses sharp return from behind so rows never ghost through
 
     // Upper tile refracts lower glass instead of hiding it (base plane only: overlay already samples the captured composite, manual remix would double-count its rim)
@@ -1037,7 +1085,7 @@ void main() {
         0.12 * (1.0 - 0.35 * compLevel) * bestMask);
     // Companion lift, pale glass reads apart from the base panel on dark
     glass += compLevel * bestMask * vec3(0.035, 0.038, 0.045);
-    vec3 envSingle = texture(BlurredSampler, uv).rgb;
+    vec3 envSingle = texture(BlurredSampler, uvP + off).rgb;
     float pickupScale = clamp(1.0 - slotLevel * 0.55 - groupLevel * 0.20, 0.25, 1.0);
     glass += envSingle * uBleed.x * (0.35 + 0.65 * topBias) * bestMask * pickupScale;
     float luma = dot(glass, vec3(0.299, 0.587, 0.114));
@@ -1062,7 +1110,7 @@ void main() {
     vec3 tintHue = userTint / max(dot(userTint, vec3(0.333)), 0.06);
     if (tStr > 0.001) {
         float roleW = (0.15 + 0.35 * controlLevel + 0.55 * activeLevel) * (1.0 - cardLevel);
-        float optDepth = clamp(max(-bestD, 0.0) / max(bevelWidthPx, 1.0), 0.0, 1.0); // Beer-Lambert-Bouguer optical depth
+        float optDepth = clamp(max(-bestD, 0.0) / max(lensWidthPx, 1.0), 0.0, 1.0);
         vec3 sigma = clamp(vec3(1.0) - tintHue, vec3(0.0), vec3(1.0)) * 2.2;
         glass *= mix(vec3(1.0), exp(-sigma * (0.25 + 0.75 * optDepth)), tStr * roleW);
         glass += userTint * tStr * roleW * 0.05;
@@ -1113,9 +1161,9 @@ void main() {
         }
     }
     vec2 rimN = mix(lensN, -lensN, concaveK);
-    walkLight = normalize(mix(normalize(vec2(-0.45, 0.89)), walkLight, 0.40)); // fixed GUI key steadies menus
-    vec3 N3 = normalize(vec3(rimN * bevelSlope * 0.35, 1.0)); // true lens surface normal
-    vec3 L3 = normalize(vec3(walkLight * 0.6, 0.8)); // screen key light leans from the front
+    walkLight = normalize(mix(normalize(vec2(-0.45, 0.89)), walkLight, 0.40));
+    vec3 N3 = normalize(vec3(rimN * lensGrad * 0.9, 1.0));
+    vec3 L3 = normalize(vec3(walkLight * 0.6, 0.8));
     // One rim language for buttons and panels, brightest faces the light
     float facing = max(dot(rimN, walkLight), 0.0);
     float angular = smoothstep(-0.15, 0.85, facing);
@@ -1127,18 +1175,18 @@ void main() {
     specular = max(specular, (rimOn ? 0.05 : 0.0) * max(uLightDir.w, 0.25));
     specular *= mix(0.35, 1.0, clamp(fresnelS, 0.0, 1.0)); // edge-on reflects, flat transmits
     specular *= mix(1.25, 0.8, frostK); // wide rough lobe reads dimmer
-    specular *= mix(1.0, 1.2, capMask); // caps catch harder light
-    specular = max(specular, specN3 * intensity * (rimOn ? 1.0 : 0.0)); // N3 lobe joins the facing lobe
+    specular *= mix(1.0, 1.15, capMask); // caps catch harder light
+    specular = max(specular, specN3 * intensity * (rimOn ? 1.0 : 0.0) * clamp(uRefl.w, 0.0, 2.0)); // N3 lobe joins the facing lobe
     // material coeff WOW: HERO catches MORE sun (convex cabochon), BASE 1.00 GROUP 0.80 SLOT 0.28 ACTIVE 1.35 — buttons brighter than panel.
     float matSpec = mix(1.00, 1.30, isCtrl);
     matSpec = mix(matSpec, 0.28, clamp(slotLevel,0.0,1.0));
     matSpec = mix(matSpec, 0.80, clamp(groupLevel,0.0,1.0));
     matSpec = mix(matSpec, 0.90, clamp(activeLevel,0.0,1.0));
     float curveBoost = 1.0 + (1.0 - sizeK) * 0.25 * clamp(controlLevel + activeLevel + dockLevel, 0.0, 1.0); // small radius bends harder
-    float topOnly = min(rimBand * specular * matSpec * 0.75 * curveBoost * (1.0 + cardLevel * 0.7) * (1.0 - popupLevel * 0.65), 0.6); // Clamp apex spikes, no white pixels
+    float topOnly = min(rimBand * specular * matSpec * 0.75 * curveBoost * (1.0 + cardLevel * 0.7) * (1.0 - popupLevel * 0.65), 0.9);
     float oppFacing = max(dot(rimN, -walkLight), 0.0);
-    float oppMask = smoothstep(0.28, 0.75, oppFacing) * pow(oppFacing, 5.0);
-    float bottomOnly = rimBand * oppMask * uLightDir.z * max(uLightDir.w,0.32) * 0.012 * isCtrl;
+    float oppMask = smoothstep(0.18, 0.85, oppFacing) * pow(oppFacing, 3.0);
+    float bottomOnly = rimBand * oppMask * uLightDir.z * max(uLightDir.w,0.32) * 0.18 * isCtrl;
     float causticBand = smoothstep(-3.0, -1.0, rimSDF) * (1.0 - smoothstep(-1.0, 0.2, rimSDF));
     glass += causticBand * bestMask * sunCol * (0.06 * sunMaster * sunI * topBias) * (1.0 - concaveK); // focused-ray lift, sun slider wakes it
     // HIGHLIGHT rim light terms alone on black
@@ -1151,33 +1199,48 @@ void main() {
     vec3 rimWhite = vec3(1.0, 1.02, 1.08);
     // S1 calm: edge takes the light colour, softer white base
     float sunK = 0.8 * (1.0 - concaveK * 0.65);
-    vec3 rimTint = mix(rimWhite, sunCol, sunK) * (0.42 + 0.85 * specular) * uParams.z;
+    vec3 rimTint = mix(rimWhite, sunCol, sunK) * (0.30 + 1.15 * specular) * uParams.z;
     // backdrop adaptive for rim: bright bg -> rim darker, dark bg -> brighter
     rimTint *= mix(1.0, 0.82, brightMask * 0.45);
     rimTint *= mix(1.0, 1.18, darkMask * 0.35);
     rimTint = mix(rimTint, rimTint * tintHue,
         tStr * (0.3 + 0.7 * clamp(controlLevel + activeLevel, 0.0, 1.0)) * (1.0 - cardLevel));
     glass += topOnly * rimTint;
-    glass += bottomOnly * rimTint * 0.30;
+    glass += bottomOnly * rimTint * 0.55;
     glass += iconRim * rimTint * 0.9;
+    // Face sheen veil: wide soft light across the flat face, backdrop colour leaning to the light side
+    float reflK = clamp(uRefl.x, 0.0, 1.0);
+    vec3 Vv = vec3(0.0, 0.0, 1.0);
+    vec3 Hv = normalize(L3 + Vv);
+    // Tilt the half-vector toward the light: peak sits on the lit slope, never a flashlight blob dead centre
+    vec3 Hshift = normalize(Hv + vec3(walkLight * 0.45, 0.0));
+    float broadSpec = pow(max(dot(N3, Hshift), 0.0), clamp(uRefl.y, 2.0, 6.0));
+    vec3 envRef = texture(BlurredSampler, uvP - walkLight * 0.010).rgb;
+    vec3 reflCol = mix(vec3(1.0), envRef, clamp(uRefl.z, 0.0, 1.0));
+    float faceZone = 1.0 - rimBand * 0.65;
+    glass += broadSpec * reflCol * (0.10 * reflK) * bestMask * faceZone * (1.0 - matteK) * (1.0 - concaveK * 0.5) * (1.0 - fuseW * 0.5);
     // Backdrop hue gathered at the rim, grey rooms add nothing
-    vec3 edgeCol = texture(BlurredSampler, uv - rimN * 3.0 / uScreen.xy).rgb;
+    vec3 edgeCol = texture(BlurredSampler, uvP + off).rgb;
     vec3 edgeHue = edgeCol - vec3(dot(edgeCol, vec3(0.3333)));
     glass += rimBand * edgeHue * uBleed.y * bestMask * (1.0 - popupLevel * 0.7);
+    // Inner glow sits one band deeper than the white rim: white line outside, backdrop colour inside
+    float innerGlowBand = smoothstep(-6.0, -3.0, rimSDF) * (1.0 - smoothstep(-3.0, -0.7, rimSDF));
+    vec3 coloredGlow = mix(edgeHue, edgeCol, 0.35);
+    glass += innerGlowBand * coloredGlow * uBleed.y * 0.40 * bestMask * (1.0 - popupLevel * 0.7) * (0.65 + 0.35 * topBias) * (1.0 - fuseW * 0.5);
     // BLEED backdrop color pickup alone
     if (mode == 12) {
         fragColor = vec4(clamp(envSingle * uBleed.x + rimBand * edgeHue * uBleed.y, 0.0, 1.0), 1.0);
         return;
     }
     // base uniform edge — thin, visible even with Refraction=0/Frost=OFF, decoupled
-    float rimAddBase = rimOn ? 0.08 : 0.04;
+    float rimAddBase = rimOn ? 0.030 : 0.012;
     if (uPanel.z > 0.5 && controlLevel > 0.5) rimAddBase *= 0.62;
     // Higher glass catches more rim light, elevation reads at any material
     float elevK = topIdx >= 0 ? (0.8 + 0.10 * clamp(topElev, 0.0, 6.0)) : 1.0;
-    float rimAdd = rimAddBase * rimK * elevK * (1.0 + cardLevel * 0.5) * (1.0 - popupLevel * 0.4) * (0.55 + 0.32 * facing * mix(1.0, 0.55, isCtrl) * max(uLightDir.w,0.32));
+    float rimAdd = rimAddBase * rimK * elevK * (1.0 + cardLevel * 0.5) * (1.0 - popupLevel * 0.4) * (0.20 + 0.80 * facing * mix(1.0, 0.55, isCtrl) * max(uLightDir.w,0.32));
     rimAdd *= 1.0 - concaveK * 0.85;
     glass += rimBand * rimAdd * (0.45 + 0.55 * slopeN) * vec3(1.0, 1.02, 1.06) * mix(1.0, 1.2, isCtrl);
-    glass *= 1.0 - rimBand * (1.0 - topBias) * (rimOn ? 0.06 : 0.0);
+    glass *= 1.0 - rimBand * (1.0 - topBias) * (rimOn ? 0.025 : 0.0);
     // Upper glass casts onto lower glass, layers read apart
     float topShadow = exp(-max(topOut - 1.0, 0.0) * 0.45) * (1.0 - smoothstep(4.0, 6.0, topOut));
     glass *= 1.0 - topShadow * 0.14 * bestMask * step(0.5, topOut);
@@ -1186,7 +1249,11 @@ void main() {
     glass *= 1.0 + elevLift * bestMask;
     float darkBand = (1.0 - smoothstep(0.0, 2.4, abs(rimSDF + 1.0))) * (0.45 + 0.55 * slopeN);
     darkBand *= 1.0 - overGlass * 0.85;
-    glass *= 1.0 - darkBand * (0.05 + 0.05 * brightMask) * bestMask * (1.0 - concaveK * 0.85);
+    darkBand *= 0.20 + 0.80 * (1.0 - facing);
+    glass *= 1.0 - darkBand * (0.010 + 0.012 * brightMask) * bestMask * (1.0 - concaveK * 0.85) * (1.0 - fuseW * 0.4);
+    // Side thickness cues geometry, not light: left/right walls read as glass mass from any sun angle
+    float sideThick = (1.0 - smoothstep(0.0, 2.4, abs(rimSDF + 1.0))) * clamp(abs(rimN.x), 0.0, 1.0);
+    glass *= 1.0 - sideThick * 0.012 * bestMask * (1.0 - concaveK * 0.85);
     // exposure clamp — never pure white/black (fixes snow dissolve)
     glass = clamp(glass, vec3(0.04), vec3(0.96));
 

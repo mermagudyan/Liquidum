@@ -170,11 +170,14 @@ public class GuiGraphicsExtractorMixin {
 			return;
 		}
 		if (sp.startsWith("recipe_book/tab")) {
-			// Active tab becomes book surface (group 1), idle tabs fuse alone
+			// Active tab joins the book surface (elev 0, group 1), idle tabs fuse alone
 			boolean sel = sp.contains("selected");
-			if (sel) LiquidGlassRenderer.submitSpriteTile(x, y, width + LiquidGlassRenderer.tabBridge(x, y, width, height), height, LiquidGlassRenderer.MAT_COMPANION, 1.0f, 1.0f);
+			if (sel) LiquidGlassRenderer.submitSpriteTile(x, y, width + LiquidGlassRenderer.tabBridge(x, y, width, height), height, LiquidGlassRenderer.MAT_COMPANION, 0.0f, 1.0f);
 			else LiquidGlassRenderer.submitSpriteTile(x, y, width, height, mat, 0.0f, 2.0f + (y / 20));
-		} else if (sp.startsWith("widget/text_field") || sp.startsWith("recipe_book/overlay")) {
+		} else if (sp.startsWith("widget/text_field")) {
+			// Base plane until upper sheets get content replay, own group so it never fuses
+			LiquidGlassRenderer.submitSpriteTile(x, y, width, height, mat, 0.0f, 20.0f);
+		} else if (sp.startsWith("recipe_book/overlay")) {
 			// In-book controls match book height, fuse alone
 			LiquidGlassRenderer.submitSpriteTile(x, y, width, height, mat, 1.0f, 0.0f);
 		} else {
@@ -336,13 +339,32 @@ public class GuiGraphicsExtractorMixin {
 	/** P2: Anvil cost / Enchant clues — рисуются в extractBackground (до blur) → размывались.
 	 *  Откладываем text из background-фазы в foreground (после стекла), как entity/book. */	@Inject(method = "text(Lnet/minecraft/client/gui/Font;Lnet/minecraft/network/chat/Component;IIIZ)V", at = @At("HEAD"), cancellable = true)
 	private void liquidum$deferBackgroundText(net.minecraft.client.gui.Font font, net.minecraft.network.chat.Component text, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		// Defers only truly pre-blur container foreground, post-marker text stays
 		if (!LiquidGlassRenderer.deferForeground()) return;
 		if (LiquidGlassRenderer.isBlurMarkerSet()) return; // уже после blur — sharp и так
 		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
-		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
+		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) {
+			net.minecraft.util.FormattedCharSequence seq = net.minecraft.locale.Language.getInstance()
+				.getVisualOrder(text);
+			liquidum$stashPlaneText(font, seq, x, y, color, shadow, ci);
+			return;
+		}
 		LiquidGlassRenderer.deferText(font, text, x, y, color, shadow);
 		ci.cancel();
+	}
+	// Widget text replays above its own plane, covered text stays refracted backdrop
+	private void liquidum$stashPlaneText(net.minecraft.client.gui.Font font, net.minecraft.util.FormattedCharSequence seq, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+		if (!LiquidGlassRenderer.isEnabled() || !LiquidGlassRenderer.isBlurMarkerSet()) return;
+		if (LiquidGlassRenderer.isInForegroundReplay()) return;
+		float owner = LiquidGlassRenderer.ownerElevFor(x, y);
+		org.joml.Matrix3x2f pose;
+		try {
+			pose = new org.joml.Matrix3x2f(this.liquidum$extractor().pose());
+		} catch (Exception e) {
+			return;
+		}
+		if (LiquidGlassRenderer.stashPlaneText(font, seq, pose, x, y, color, shadow, owner)) ci.cancel();
 	}
 	@Inject(method = "text(Lnet/minecraft/client/gui/Font;Ljava/lang/String;IIIZ)V", at = @At("HEAD"), cancellable = true)
 	private void liquidum$deferBackgroundTextStr(net.minecraft.client.gui.Font font, String text, int x, int y, int color, boolean shadow, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
@@ -350,7 +372,12 @@ public class GuiGraphicsExtractorMixin {
 		if (LiquidGlassRenderer.isBlurMarkerSet()) return;
 		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
-		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
+		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) {
+			net.minecraft.util.FormattedCharSequence seq = net.minecraft.locale.Language.getInstance()
+				.getVisualOrder(net.minecraft.network.chat.FormattedText.of(text));
+			liquidum$stashPlaneText(font, seq, x, y, color, shadow, ci);
+			return;
+		}
 		LiquidGlassRenderer.deferText(font, net.minecraft.network.chat.Component.literal(text), x, y, color, shadow);
 		ci.cancel();
 	}
@@ -360,7 +387,10 @@ public class GuiGraphicsExtractorMixin {
 		if (LiquidGlassRenderer.isBlurMarkerSet()) return;
 		if (LiquidGlassRenderer.isInForegroundReplay()) return;
 		var screen = net.minecraft.client.Minecraft.getInstance().gui.screen();
-		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) return;
+		if (!(screen instanceof net.minecraft.client.gui.screens.inventory.AbstractContainerScreen)) {
+			liquidum$stashPlaneText(font, text, x, y, color, shadow, ci);
+			return;
+		}
 		LiquidGlassRenderer.deferSeqText(font, text, x, y, color, shadow);
 		ci.cancel();
 	}

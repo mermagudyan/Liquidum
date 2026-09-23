@@ -47,13 +47,16 @@ public class DemoElement {
 		return px >= x && px <= x + w && py >= y && py <= y + h;
 	}
 
-	// Shader shape id: 0 is box, 1 is triangle SDF, 2 is true circle SDF
+	// Shader shape id: 0 is box, 1 is triangle SDF, 2 is true circle SDF, 5 is squircle
 	public int shapeId() {
 		if (type == Type.TRIANGLE) {
 			return 1;
 		}
 		if (type == Type.CIRCLE) {
 			return 2;
+		}
+		if (type == Type.PANEL) {
+			return 5;
 		}
 		return 0;
 	}

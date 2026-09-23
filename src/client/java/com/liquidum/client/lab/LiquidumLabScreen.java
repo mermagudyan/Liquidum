@@ -33,9 +33,10 @@ public class LiquidumLabScreen extends Screen {
 
 	private static final int ROW_H = 22;
 	private static final String[] SCENES = {"Стопка", "Вразброс", "Вложенность", "Пузыри"};
-	private static final String[] BACKDROP_NAMES = {"трава", "снег", "ад", "край", "решётка", "ночь", "песок", "мята", "слива", "свой", "фото"};
-	private static final int[] BACKDROP_COLORS = {0xFF5B7C4A, 0xFFECECEC, 0xFF2A0A0A, 0xFF1A1A2A, 0xFF4A5A44, 0xFF101018, 0xFFD8C49A, 0xFF9AD8B4, 0xFF5A2A5A};
+	private static final String[] BACKDROP_NAMES = {"трава", "снег", "ад", "край", "решётка", "ночь", "песок", "мята", "слива", "свой", "фото", "полосы"};
+	private static final int[] BACKDROP_COLORS = {0xFF5B7C4A, 0xFFECECEC, 0xFF2A0A0A, 0xFF1A1A2A, 0xFF4A5A44, 0xFF101018, 0xFFD8C49A, 0xFF9AD8B4, 0xFF5A2A5A, 0xFF14141C};
 	private static final int GRID_INDEX = 4;
+	private static final int STRIPES_INDEX = 11;
 	private static final int CUSTOM_INDEX = 9;
 	private static final int PHOTO_INDEX = 10;
 	private static final float SIZE_MIN = 16f;
@@ -459,7 +460,7 @@ public class LiquidumLabScreen extends Screen {
 
 	private int buildDebugTab(int lx, int y, int lw) {
 		var channels = new java.util.ArrayList<String>();
-		for (int i = 0; i < 15; i++) {
+		for (int i = 0; i < 16; i++) {
 			channels.add(LiquidumDebugState.soloNameOf(i));
 		}
 		y = addDropRow(lx, y, lw, tr("Вид"), channels, LiquidumDebugState.soloStage, idx -> {
@@ -508,6 +509,7 @@ public class LiquidumLabScreen extends Screen {
 		});
 		y = addNumericRow(lx, y, lw, tr("Радиус слипания"), () -> LiquidumDebugState.fusionRadius, v -> LiquidumDebugState.fusionRadius = v, 0f, 30f, 1f, 12f, () -> LiquidumDebugState.fusion);
 		y = addNumericRow(lx, y, lw, tr("Солнечный блик"), () -> LiquidumDebugState.sunSpec, v -> LiquidumDebugState.sunSpec = v, 0f, 2f, 0.1f, 1f);
+		y = addToggleRow(lx, y, lw, tr("Отражение"), () -> LiquidumDebugState.reflection > 0f, v -> LiquidumDebugState.reflection = v ? 1f : 0f);
 		y = addToggleRow(lx, y, lw, tr("Анимация открытия"), () -> LiquidumDebugState.animOpen, v -> LiquidumDebugState.animOpen = v);
 		var cfg = LiquidumCore.getConfig();
 		y = addToggleRow(lx, y, lw, tr("Ореол: сердца"), () -> cfg.healthGlass, v -> {
@@ -572,8 +574,8 @@ public class LiquidumLabScreen extends Screen {
 
 	private int buildMatTab(int lx, int y, int lw) {
 		y = addNumericRow(lx, y, lw, tr("Скругление"), () -> LiquidumDebugState.cornerRadiusFraction, v -> LiquidumDebugState.cornerRadiusFraction = v, 0f, 1f, 0.05f, 0.18f);
-		y = addNumericRow(lx, y, lw, tr("Преломление"), () -> LiquidumDebugState.refraction, v -> LiquidumDebugState.refraction = v, 0f, 60f, 1f, 9f);
-		y = addNumericRow(lx, y, lw, tr("Ширина края"), () -> LiquidumDebugState.edgeWidth, v -> LiquidumDebugState.edgeWidth = v, 0.25f, 2f, 0.05f, 1f);
+		y = addNumericRow(lx, y, lw, tr("Преломление"), () -> LiquidumDebugState.refraction, v -> LiquidumDebugState.refraction = v, 0f, 60f, 1f, 30f);
+		y = addNumericRow(lx, y, lw, tr("Ширина края"), () -> LiquidumDebugState.edgeWidth, v -> LiquidumDebugState.edgeWidth = v, 0.25f, 2f, 0.05f, 2f);
 		y = addNumericRow(lx, y, lw, tr("Кромка"), () -> LiquidumDebugState.fresnel, v -> LiquidumDebugState.fresnel = v, 0f, 2f, 0.05f, 0.65f, () -> LiquidumDebugState.rim);
 		y = addNumericRow(lx, y, lw, tr("Чёткость"), () -> LiquidumDebugState.sharpnessMix, v -> LiquidumDebugState.sharpnessMix = v, 0f, 1f, 0.02f, 0.18f);
 		y = addNumericRow(lx, y, lw, tr("Радиус мата"), () -> LiquidumDebugState.frostRadius, v -> LiquidumDebugState.frostRadius = v, 0f, 20f, 0.5f, 10.0f, () -> LiquidumDebugState.frost);
@@ -614,7 +616,28 @@ public class LiquidumLabScreen extends Screen {
 		fromB.active = snapB.taken;
 		addRenderableWidget(fromB);
 		y += ROW_H;
+		y = addSectionRow(lx, y, lw, tr("Проверка линзы"));
+		addRenderableWidget(Button.builder(Component.literal(tr("Голая линза")), b -> {
+			applyBareLens();
+			init();
+		}).bounds(lx, y, lw, 20).build());
+		y += ROW_H;
 		return y;
+	}
+
+	// Bare lens preset: isolate displacement, snapshots A/B bring the look back
+	private static void applyBareLens() {
+		LiquidumDebugState.frost = false;
+		LiquidumDebugState.aberration = false;
+		LiquidumDebugState.bodyBleed = 0f;
+		LiquidumDebugState.edgeBleed = 0f;
+		LiquidumDebugState.chroma = 0f;
+		LiquidumDebugState.sunSpec = 0f;
+		var cfg = LiquidumCore.getConfig();
+		cfg.tintStrength = 0f;
+		cfg.save();
+		LiquidGlassRenderer.applyConfig(cfg);
+		LiquidumProfiles.save();
 	}
 
 	// Material snapshot: every MAT/FX value plus tint, view state excluded
@@ -641,6 +664,7 @@ public class LiquidumLabScreen extends Screen {
 		s.bodyBleed = LiquidumDebugState.bodyBleed;
 		s.edgeBleed = LiquidumDebugState.edgeBleed;
 		s.chroma = LiquidumDebugState.chroma;
+		s.reflection = LiquidumDebugState.reflection;
 		s.sunSpec = LiquidumDebugState.sunSpec;
 		var cfg = LiquidumCore.getConfig();
 		s.tintStrength = cfg.tintStrength;
@@ -674,6 +698,7 @@ public class LiquidumLabScreen extends Screen {
 		LiquidumDebugState.bodyBleed = s.bodyBleed;
 		LiquidumDebugState.edgeBleed = s.edgeBleed;
 		LiquidumDebugState.chroma = s.chroma;
+		LiquidumDebugState.reflection = s.reflection;
 		LiquidumDebugState.sunSpec = s.sunSpec;
 		var cfg = LiquidumCore.getConfig();
 		cfg.tintStrength = s.tintStrength;
@@ -1126,6 +1151,9 @@ public class LiquidumLabScreen extends Screen {
 			e.type = DemoElement.Type.CIRCLE;
 			e.corner = 1f;
 			e.elevation = 2f;
+			e.merge = true;
+			e.fuseGroup = -1;
+			e.mat = -1;
 			e.w = d[i];
 			e.h = d[i];
 			e.x = cx + ox[i] * vw - d[i] / 2f;
@@ -1509,14 +1537,14 @@ public class LiquidumLabScreen extends Screen {
 			if (!linkedCorner && e.corner >= 0f) {
 				shapeW += 0.5f + Math.min(1f, e.corner) * 0.499f;
 			}
-			// Default lanes start at 10, game legacy groups 0-1 stay clear
+			// Auto lane is group 0, the world-tested fusion path
 			float grp;
 			if (!e.merge) {
 				grp = 1000f + idx;
 			} else if (e.fuseGroup >= 0) {
 				grp = (float) e.fuseGroup;
 			} else {
-				grp = 10f + (float) e.zOrder;
+				grp = 0f;
 			}
 			LiquidGlassRenderer.submitSpriteTile(Math.round(e.x), Math.round(e.y),
 				Math.round(e.w), Math.round(e.h), resolveMat(e), e.elevation, grp, shapeW);
@@ -1673,6 +1701,18 @@ public class LiquidumLabScreen extends Screen {
 		if (flatBackdrop) {
 			return;
 		}
+		if (backdrop == STRIPES_INDEX) {
+			int[] cols = {0xFF2A6AD8, 0xFF3AA845, 0xFFE8C53A, 0xFFD84A6A, 0xFF7A4AD8};
+			for (int i = 0; i < cols.length; i++) {
+				g.fill(width * i / cols.length, 0, width * (i + 1) / cols.length, height, cols[i]);
+			}
+			for (int x = 0; x < width; x += 24) {
+				g.fill(x, 0, x + 2, height, 0xD8FFFFFF);
+			}
+			g.centeredText(font, "AaBbGg 0123456789", width / 2, height / 3 - 5, 0xFFFFFFFF);
+			g.centeredText(font, "ALPHA BETA GAMMA DELTA", width / 2, height * 2 / 3, 0xFF101018);
+			return;
+		}
 		if (backdrop == GRID_INDEX) {
 			for (int y = 0; y < height; y += 20) {
 				for (int x = 0; x < width; x += 20) {
@@ -1751,7 +1791,7 @@ public class LiquidumLabScreen extends Screen {
 			float grp;
 			if (!e.merge) grp = 1000f + idx;
 			else if (e.fuseGroup >= 0) grp = (float) e.fuseGroup;
-			else grp = 10f + (float) e.zOrder;
+			else grp = 0f;
 			lanes.add(grp);
 		}
 		return lanes.size();

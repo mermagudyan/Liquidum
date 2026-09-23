@@ -51,8 +51,8 @@ public class LiquidumDebugState {
 
 	/** Material params (mirrored from glass.fsh; all editable live from the Lab). iPhone: тоньше, мягче, без мыла. */
 	public static float cornerRadiusFraction = 0.18f;
-	public static float refraction = 9.0f;
-	public static float edgeWidth = 1.0f;
+	public static float refraction = 30.0f;
+	public static float edgeWidth = 2.0f;
 	public static float fresnel = 0.65f;
 	public static float sharpnessMix = 0.18f;
 	public static float sunSpec = 1.0f;
@@ -67,6 +67,8 @@ public class LiquidumDebugState {
 	public static float edgeBleed = 0.65f;
 	// Rim dispersion strength, 0..1.5
 	public static float chroma = 0.45f;
+	// Wide face sheen over the lens, 0..1, resting at the tuned default
+	public static float reflection = 0.55f;
 	// Manual light for Lab tuning, world probe off while true
 	public static boolean lightManual = false;
 	// Light direction angle in screen space, radians
@@ -131,6 +133,7 @@ public class LiquidumDebugState {
 			case 12 -> "REFR SOURCE";
 			case 13 -> "TOPMOST";
 			case 14 -> "TAILSRC";
+			case 15 -> "IOS LENS";
 			default -> "FULL";
 		};
 	}
@@ -151,6 +154,7 @@ public class LiquidumDebugState {
 			case 12 -> "refracted sample before frost";
 			case 13 -> "winning tile material as color";
 			case 14 -> "raw overlay input for popup glass";
+			case 15 -> "bare pill refraction, no frost or rim";
 			default -> "final glass over world";
 		};
 	}

@@ -85,7 +85,7 @@ public class LiquidumYaclScreen extends Screen {
 
     private void buildEffects(int x, int y, int w) {
         addToggle(x,y,w,"Blur",()->LiquidumDebugState.frost, v->{LiquidumDebugState.frost=v; LiquidumProfiles.save();}); y+=22;
-        addToggle(x,y,w,"Refraction",()->LiquidumDebugState.refraction>0.1f, v->{LiquidumDebugState.refraction=v?9f:0f; LiquidumProfiles.save();}); y+=22;
+        addToggle(x,y,w,"Refraction",()->LiquidumDebugState.refraction>0.1f, v->{LiquidumDebugState.refraction=v?30f:0f; LiquidumProfiles.save();}); y+=22;
         addToggle(x,y,w,"Fresnel/Rim",()->LiquidumDebugState.rim, v->{LiquidumDebugState.rim=v; LiquidumProfiles.save();}); y+=22;
         addToggle(x,y,w,"Aberration",()->LiquidumDebugState.aberration, v->{LiquidumDebugState.aberration=v; LiquidumProfiles.save();}); y+=22;
         addToggle(x,y,w,"Fusion",()->LiquidumDebugState.fusion, v->{LiquidumDebugState.fusion=v; LiquidumProfiles.save();}); y+=22;
@@ -100,6 +100,7 @@ public class LiquidumYaclScreen extends Screen {
         addSlider(x,y,w,"Sharpness",()->LiquidumDebugState.sharpnessMix,v->{LiquidumDebugState.sharpnessMix=v; LiquidumProfiles.save();},0f,1f,0.02f); y+=22;
         addSlider(x,y,w,"FrostRadius",()->LiquidumDebugState.frostRadius,v->{LiquidumDebugState.frostRadius=v; LiquidumProfiles.save();},0f,20f,0.5f); y+=22;
         addSlider(x,y,w,"FusionRadius",()->LiquidumDebugState.fusionRadius,v->{LiquidumDebugState.fusionRadius=v; LiquidumProfiles.save();},0f,30f,1f); y+=22;
+        addToggle(x,y,w,"Reflection",()->LiquidumDebugState.reflection>0f, v->{LiquidumDebugState.reflection=v?1f:0f; LiquidumProfiles.save();}); y+=22;
     }
 
     private void buildPreview(int x, int y, int w) {

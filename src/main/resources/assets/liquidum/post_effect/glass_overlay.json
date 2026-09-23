@@ -6,6 +6,12 @@
         "overlay_blur2": {
             "persistent": true
         },
+        "overlay_colorfield": {
+            "persistent": true
+        },
+        "overlay_deepfield": {
+            "persistent": true
+        },
         "overlay_out": {
             "persistent": true
         }
@@ -34,6 +40,30 @@
                 }
             ],
             "output": "overlay_blur2"
+        },
+        {
+            "vertex_shader": "minecraft:core/screenquad",
+            "fragment_shader": "liquidum:post/downsample",
+            "inputs": [
+                {
+                    "sampler_name": "In",
+                    "target": "overlay_blur",
+                    "bilinear": true
+                }
+            ],
+            "output": "overlay_colorfield"
+        },
+        {
+            "vertex_shader": "minecraft:core/screenquad",
+            "fragment_shader": "liquidum:post/downsample",
+            "inputs": [
+                {
+                    "sampler_name": "In",
+                    "target": "overlay_colorfield",
+                    "bilinear": true
+                }
+            ],
+            "output": "overlay_deepfield"
         },
         {
             "vertex_shader": "minecraft:core/screenquad",
@@ -1589,6 +1619,16 @@
                             0.0,
                             0.0
                         ]
+                    },
+                    {
+                        "name": "uRefl",
+                        "type": "vec4",
+                        "value": [
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0
+                        ]
                     }
                 ]
             },
@@ -1610,12 +1650,12 @@
                 },
                 {
                     "sampler_name": "ColorField",
-                    "target": "overlay_blur2",
+                    "target": "overlay_colorfield",
                     "bilinear": true
                 },
                 {
                     "sampler_name": "DeepField",
-                    "target": "overlay_blur2",
+                    "target": "overlay_deepfield",
                     "bilinear": true
                 }
             ],

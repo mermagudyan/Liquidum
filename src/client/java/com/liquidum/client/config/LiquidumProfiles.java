@@ -4,7 +4,7 @@ import com.liquidum.client.debug.LiquidumDebugState;
 
 // Single main profile, tuned live in the Lab
 public enum LiquidumProfiles {
-    ETALON(9.0f, 0.65f, 0.18f, 10.0f, 12.0f, 0.0f, 0.10f, 0.65f, 0.45f, 1.0f);
+    ETALON(30.0f, 0.65f, 0.18f, 10.0f, 12.0f, 0.0f, 0.10f, 0.65f, 0.45f, 2.0f, 0.0f);
 
     public final float refraction;
     public final float fresnel;
@@ -16,6 +16,7 @@ public enum LiquidumProfiles {
     public final float edgeBleed;
     public final float chroma;
     public final float edgeWidth;
+    public final float reflection;
 
     // Profile name follows the Lab language
     public String displayName() {
@@ -34,6 +35,7 @@ public enum LiquidumProfiles {
             && eq(edgeBleed, LiquidumDebugState.edgeBleed)
             && eq(chroma, LiquidumDebugState.chroma)
             && eq(edgeWidth, LiquidumDebugState.edgeWidth)
+            && eq(reflection, LiquidumDebugState.reflection)
             && eq(0.18f, LiquidumDebugState.cornerRadiusFraction)
             && LiquidumDebugState.frost && LiquidumDebugState.rim
             && LiquidumDebugState.aberration && LiquidumDebugState.hover
@@ -59,7 +61,7 @@ public enum LiquidumProfiles {
         return p != null ? p.displayName() : LiquidumLang.tr("Своя");
     }
 
-    LiquidumProfiles(float refraction, float fresnel, float sharpness, float frost, float fusion, float sun, float bodyBleed, float edgeBleed, float chroma, float edgeWidth) {
+    LiquidumProfiles(float refraction, float fresnel, float sharpness, float frost, float fusion, float sun, float bodyBleed, float edgeBleed, float chroma, float edgeWidth, float reflection) {
         this.refraction = refraction;
         this.fresnel = fresnel;
         this.sharpness = sharpness;
@@ -70,6 +72,7 @@ public enum LiquidumProfiles {
         this.edgeBleed = edgeBleed;
         this.chroma = chroma;
         this.edgeWidth = edgeWidth;
+        this.reflection = reflection;
     }
 
     public void apply() {
@@ -83,6 +86,7 @@ public enum LiquidumProfiles {
         LiquidumDebugState.bodyBleed = bodyBleed;
         LiquidumDebugState.edgeBleed = edgeBleed;
         LiquidumDebugState.chroma = chroma;
+        LiquidumDebugState.reflection = reflection;
         LiquidumDebugState.cornerRadiusFraction = 0.18f;
         LiquidumDebugState.frost = true;
         LiquidumDebugState.rim = true;
@@ -120,6 +124,7 @@ public enum LiquidumProfiles {
             o.addProperty("bodyBleed", LiquidumDebugState.bodyBleed);
             o.addProperty("edgeBleed", LiquidumDebugState.edgeBleed);
             o.addProperty("chroma", LiquidumDebugState.chroma);
+            o.addProperty("reflection", LiquidumDebugState.reflection);
             o.addProperty("lightManual", LiquidumDebugState.lightManual);
             o.addProperty("lightAngle", LiquidumDebugState.lightAngle);
             o.addProperty("lightLevel", LiquidumDebugState.lightLevel);
@@ -152,6 +157,7 @@ public enum LiquidumProfiles {
             if (o.has("bodyBleed")) LiquidumDebugState.bodyBleed = o.get("bodyBleed").getAsFloat();
             if (o.has("edgeBleed")) LiquidumDebugState.edgeBleed = o.get("edgeBleed").getAsFloat();
             if (o.has("chroma")) LiquidumDebugState.chroma = o.get("chroma").getAsFloat();
+            if (o.has("reflection")) LiquidumDebugState.reflection = o.get("reflection").getAsFloat();
             if (o.has("lightManual")) LiquidumDebugState.lightManual = o.get("lightManual").getAsBoolean();
             if (o.has("lightAngle")) LiquidumDebugState.lightAngle = o.get("lightAngle").getAsFloat();
             if (o.has("lightLevel")) LiquidumDebugState.lightLevel = o.get("lightLevel").getAsFloat();
